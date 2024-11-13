@@ -2,18 +2,16 @@ import argparse
 import json
 from torch.utils.data import Dataset, DataLoader
 from videollama2 import model_init, mm_infer
-import tqdm
+from tqdm import tqdm
 import os
 
 class MRDataset(Dataset):
     def __init__(self, processor, vis_root, ann_path):
         self.processor = processor
         self.vis_root = vis_root
-        self.annotation = []
 
-        assert 'jsonl' in ann_path
-        with open(ann_path, "r") as f:
-            self.annotation.extend([json.loads(line) for line in f])
+
+        self.annotation = json.load(open(ann_path, "r"))
 
     def __len__(self):
         return len(self.annotation)
@@ -67,9 +65,8 @@ def run_inference(args):
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     out_file = open(output_file, "w")
 
-    # Iterate over each sample in the ground truth file
     for i, (vid_tensor, texts, query_ids, relevant_windows) in enumerate(tqdm(dataloader)):
-        video_tensor = video_tensor[0]
+        video_tensor = vid_tensor[0]
         text = texts[0]
         query_id = query_ids[0]
         relevant_windows = relevant_windows[0]
