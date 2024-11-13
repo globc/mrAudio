@@ -1,0 +1,2 @@
+videollama2 @ git+https://github.com/DAMO-NLP-SG/VideoLLaMA2@audio_visual
+pytorchvideo

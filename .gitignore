@@ -1,0 +1,5 @@
+mraudio/
+checkpoints/*
+outputs/*
+test.err
+test.out
