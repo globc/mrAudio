@@ -1,5 +1,7 @@
 mraudio/
-checkpoints/*
-outputs/*
+checkpoints/
+outputs/
+data/*
+!data/data_preprocess.ipynb
 test.err
 test.out
