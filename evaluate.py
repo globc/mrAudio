@@ -4,6 +4,8 @@ from torch.utils.data import Dataset, DataLoader
 from videollama2 import model_init, mm_infer
 from tqdm import tqdm
 import os
+import ffmpeg
+from tqdm import tqdm
 
 class MRDataset(Dataset):
     def __init__(self, processor, vis_root, ann_path):
@@ -22,7 +24,16 @@ class MRDataset(Dataset):
         video_path = os.path.join(self.vis_root, ann["video"] + ".mp4")
         if "start" in ann:
             start, end = float(ann["start"]), float(ann["end"])
-            # TODO clip video, save?, update video_path
+
+            try:
+                stream = ffmpeg.input(video_path)
+                stream = ffmpeg.filter(stream, 'crop', start=start, end=end)
+                output_path = os.path.join(self.vis_root, f"{ann['video']}_clipped.mp4")
+                ffmpeg.output(stream, output_path).run()
+                video_path = output_path
+            except:
+                print("video read error")
+                video_input = None
 
         try:
             video_input = self.processor(video_path, va=True)
