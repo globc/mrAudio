@@ -65,7 +65,7 @@ def collate_fn(batch):
 
 def run_inference(args):
     if args.model == "videollama":
-        model, processor, tokenizer = model_init("/work/scratch/kurse/kurs00079/cb14syta/mr-Audio2/checkpoints/VideoLLaMA/VideoLLaMA2.1-7B-AV")
+        model, processor, tokenizer = model_init(str(args.model_path))
 
     if args.dataset == "QVH":
         dataset = MRDataset(processor=processor['video'], vis_root=args.video_folder, ann_path=args.annotation_file)
@@ -105,6 +105,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--model', help='', required=True)
+    parser.add_argument('--model-path', help='', required=True)
     parser.add_argument('--video-folder', help='Directory containing video files.', required=True)
     parser.add_argument('--annotation-file', help='Path to the ground truth file containing question.', required=True)
     parser.add_argument('--output-file', help='Directory to save the model results JSON.', required=True)

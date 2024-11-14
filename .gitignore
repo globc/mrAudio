@@ -1,7 +1,16 @@
 mraudio/
 checkpoints/
 outputs/
-data/*
+
+
+**/videos/*
+
+*.json
+*.jsonl
+*.mp4
+*.tar.*
+
+.*
 !data/data_preprocess.ipynb
 test.err
 test.out
