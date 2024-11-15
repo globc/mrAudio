@@ -6,6 +6,7 @@ from tqdm import tqdm
 import os
 import ffmpeg
 from tqdm import tqdm
+from utils.utils import post_process, moment_str_to_list
 
 class MRDataset(Dataset):
     def __init__(self, processor, vis_root, ann_path):
@@ -13,7 +14,8 @@ class MRDataset(Dataset):
         self.vis_root = vis_root
 
 
-        self.annotation = json.load(open(ann_path, "r"))
+        with open(ann_path, "r") as f:
+            self.annotation = [json.loads(line) for line in f]
 
     def __len__(self):
         return len(self.annotation)
@@ -21,7 +23,7 @@ class MRDataset(Dataset):
     def __getitem__(self, index):
         ann = self.annotation[index]
 
-        video_path = os.path.join(self.vis_root, ann["video"] + ".mp4")
+        video_path = os.path.join(self.vis_root, ann["vid"] + ".mp4")
         if "start" in ann:
             start, end = float(ann["start"]), float(ann["end"])
 
@@ -42,7 +44,6 @@ class MRDataset(Dataset):
             video_input = None
 
         query = ann["query"]
-        relevant_windows = str(ann["relevant_windows"])
 
         query_prompt = "Query: " + query + "\n"
         task_prompt = "Given the video and the query, find the relevant windows.\nRelevant windows: "
@@ -52,20 +53,24 @@ class MRDataset(Dataset):
         return {
             "video": video_input,
             "text": text_input,
-            "query_id": ann["qid"],
-            "relevant_windows": relevant_windows,
+            # qid, query & vid necessary for QVH submission
+            "qid": ann["qid"],
+            "query": query,
+            "vid": ann["vid"],
         }
     
 def collate_fn(batch):
-    vid  = [x['video'] for x in batch]
+    video  = [x['video'] for x in batch]
     txt = [x['text'] for x in batch]
-    qid  = [x['query_id'] for x in batch]
-    rel_win  = [x['relevant_windows'] for x in batch]
-    return vid, txt, qid, rel_win
+    qid  = [x['qid'] for x in batch]
+    query = [x['query'] for x in batch]
+    vid = [x['vid'] for x in batch]
+
+    return video, txt, qid, query, vid
 
 def run_inference(args):
-    if args.model == "videollama":
-        model, processor, tokenizer = model_init(str(args.model_path))
+    if "VideoLLaMA" in args.model_path:
+        model, processor, tokenizer = model_init(args.model_path)
 
     if args.dataset == "QVH":
         dataset = MRDataset(processor=processor['video'], vis_root=args.video_folder, ann_path=args.annotation_file)
@@ -76,11 +81,9 @@ def run_inference(args):
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     out_file = open(output_file, "w")
 
-    for i, (vid_tensor, texts, query_ids, relevant_windows) in enumerate(tqdm(dataloader)):
-        video_tensor = vid_tensor[0]
+    for i, (video_tensors, texts, qids, queries, vids) in enumerate(tqdm(dataloader)):
+        video_tensor = video_tensors[0]
         text = texts[0]
-        query_id = query_ids[0]
-        relevant_windows = relevant_windows[0]
 
         try:
             output = mm_infer(
@@ -95,8 +98,17 @@ def run_inference(args):
             print("generation error")
             output = "error"
 
-        sample_set = {'id': query_id, 'text': text, 'relevant_windows': relevant_windows, 'pred': output}
-        out_file.write(json.dumps(sample_set) + "\n")
+        pred_relevant_windows = moment_str_to_list(post_process(output))
+
+        out = {
+                "qid": qids[0],
+                "query": queries[0],
+                "vid": vids[0],
+                "pred_relevant_windows": pred_relevant_windows,
+                # "pred_saliency_scores": , # TODO for QVH submission?
+            }
+        
+        out_file.write(json.dumps(out) + "\n")
 
     out_file.close()
 
@@ -104,7 +116,6 @@ def run_inference(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model', help='', required=True)
     parser.add_argument('--model-path', help='', required=True)
     parser.add_argument('--video-folder', help='Directory containing video files.', required=True)
     parser.add_argument('--annotation-file', help='Path to the ground truth file containing question.', required=True)
