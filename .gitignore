@@ -5,6 +5,7 @@ data/
 
 **/videos/*
 
+*.pyc
 *.json
 *.jsonl
 *.mp4
