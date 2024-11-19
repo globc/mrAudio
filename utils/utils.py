@@ -23,6 +23,7 @@ def post_process(pred):
     """
 
     pred = pred.split("</s>")[0]
+    pred = pred.replace('\n','').replace('\r','')
 
     # check if the string has the right format of a nested list
     # the list should look like this: [[0, 1], [4, 7], ...]
@@ -342,12 +343,22 @@ def moment_str_to_list(m):
 
     # if a sublist of _m has more than 2 elements, it means that the model has not learned to predict the right format
     # substitute that sublist with [-1, -1]
-    for i in range(len(_m)):
+    #for i in range(len(_m)):
+    #    if isinstance(i, int):
+    #        _m[i] = [-1, -1]
+    #    if len(_m[i]) != 2:
+    #        # print(f"Got a sublist with more or less than 2 elements!{_m[i]}")
+    #        _m[i] = [-1, -1]
+
+
+    for i in _m:
         if isinstance(i, int):
             _m[i] = [-1, -1]
-        if len(_m[i]) != 2:
-            # print(f"Got a sublist with more or less than 2 elements!{_m[i]}")
-            _m[i] = [-1, -1]
+        if len(i) != 2:
+            _m[i] = [-len(i)]
+        for j in i:
+            if not isinstance(j, int):
+                m[i][j] = -1
 
     return _m
 
