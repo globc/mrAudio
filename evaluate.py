@@ -46,9 +46,40 @@ class MRDataset(Dataset):
         query = ann["query"]
 
         query_prompt = "Query: " + query + "\n"
-        task_prompt = "Given the video and the query, find the relevant windows.\nRelevant windows: "
 
-        text_input = query_prompt + task_prompt
+        format = """[[x, y],[a,b]] where x,y are the first valid frames of the given query and a,b are also valid frames.
+          if there is only one valid frame use [[x,y]]
+
+          All entries must be a positive number
+          Do not answer in any other format
+        """
+
+        explaination = "where relevant_windows are the actual frames that are relevant for the given query"
+
+        example = """
+query: some military patriots takes us through their safety procedures and measures. duration: 150 relevant_windows: [[72, 82], [84, 94], [96, 106], [108, 118], [120, 130], [136, 142], [144, 146]]
+query: Man in baseball cap eats before doing his interview. duration: 150 relevant_windows: [[96, 114]]
+query: A man in a white shirt discusses the right to have and carry firearms. duration: 150 relevant_windows: [[48, 50], [76, 120], [122, 138], [140, 146]]
+query: A view of a bamboo fountain of water in a tea house and people scoop from and wash off duration: 150 relevant_windows: [[64, 92]]
+
+"""
+
+
+        task_prompt = f"""
+        do not hallucinate
+
+        Given the following example: {example}
+
+        Explaination: {explaination}
+
+        Please follow the examples and answer only in the following format: {format}
+
+        The video and the query, find the relevant windows.
+
+        Relevant windows:
+        """
+
+        text_input = query_prompt + "\n" + task_prompt
 
         return {
             "video": video_input,
