@@ -103,7 +103,7 @@ def run_inference(args):
     if "VideoLLaMA" in args.model_path:
         model, processor, tokenizer = model_init(args.model_path)
 
-    if args.dataset == "QVH":
+    if args.dataset in ["QVH", "Charades_STA"]:
         dataset = MRDataset(processor=processor['video'], vis_root=args.video_folder, ann_path=args.annotation_file)
 
     dataloader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate_fn)
