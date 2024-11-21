@@ -45,30 +45,42 @@ class MRDataset(Dataset):
 
         query = ann["query"]  
 
-        example = """"query: <Query> some military patriots takes us through their safety procedures and measures. <Query> 
+        example = """"
+                    query: <Query> some military patriots takes us through their safety procedures and measures. <Query> 
                     duration: <Duration> 150 </Duration>
-                    relevant_windows: [[0.80, 0.82], [0.84, 0.94], [0.96, 1]]', 
+                    relevant_windows: [[0.80, 0.83], [0.84, 0.94]]', 
+
+                    query: <Query> Man in baseball cap eats before doing his interview. <Query> 
+                    duration:  <Duration> 150  </Duration> 
+                    relevant_windows: [[0.96, 1]]'
+
+                    query: <Query> A view of a bamboo fountain of water in a tea house and people scoop from and wash off <Query> 
+                    duration:  <Duration> 150  </Duration> 
+                    relevant_windows: [[0.21, 0.99]]'
+
+                    query: <Query> The weather map shows snowfall <Query> 
+                    duration:  <Duration> 150  </Duration> 
+                    relevant_windows: [[0.12, 0.17],[0.27, 0.30],[0.32, 0.42],[0.43, 0.50],[0.68, 0.70],[0.80, 0.82]]'
                 """
 
 
-        format_text = """[[x, y],[a,b]]
-          if there is only one valid frame use [[x,y]]
-          All entries must between 0 and 1
+        format_text = """[[x, y],[a,b],[c,d]]
+            if there is only one valid frame use [[x,y]]
+            they represent the persentages of the video duration
+            Ensure that the windows are in ascending order and do not overlap.
         """
 
         prompt = f"""
         Do not hallucinate \n
+        follow the flowing text as accurate as possible \n
 
+        Example: <Example> {example} </Example> \n
+        Format: <Format> {format_text} </Format> \n
+        Query: <Query> {query} </Query> 
+        Duration: <Duration> {ann["duration"]} </Duration> \n
 
-        Given the following Example: <Example> {example} </Example> \n
-        Only awnswer in the folowing Format: <Format> {format_text} </Format> \n
-
-        
-        Query: <Query> {query} </Query> Duration: <Duration> {ann["duration"]} </Duration> \n
-
-        please give me the relevant windows matching the Query \n
-
-        Relevant Windows: \n
+        For die video give me the relevant windows matching the Query for the given duration \n
+        relevant_windows:  \n
         """
 
         text_input = prompt 
@@ -127,7 +139,7 @@ def run_inference(args):
         pred_relevant_windows = moment_str_to_list(post_process(output))
 
         out = {
-             "raw_out": raw_out,
+                "raw_out": raw_out,
                 "qid": qids[0],
                 "query": queries[0],
                 "vid": vids[0],
