@@ -11,6 +11,24 @@ import wandb
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
+def convert_percentages_to_second(percentages:str, duration:int):
+    if not re.match(r"\[\[.*\]\]", percentages):
+        return "[[-1, -1]]"
+
+    def percentage_to_frame(percentage):
+        try:
+            return int(percentage * duration)
+        except:
+            return -1
+
+    def replace_match(match):
+        number = float(match.group())
+        new_number = percentage_to_frame(number)
+        return str(new_number)
+
+    return re.sub(r"[-+]?\d*\.\d+|\d+", replace_match, percentages)
+
+
 def post_process(pred):
     """Post process predicted output to be in the format of moments, i.e. [[0, 1], [4, 7]].
         - if no comma, i.e. " " → add comma, i.e. ", "
@@ -351,14 +369,14 @@ def moment_str_to_list(m):
     #        _m[i] = [-1, -1]
 
 
-    for i in _m:
-        if isinstance(i, int):
+    for i in range(len(_m)):
+        if isinstance(_m[i], int):
             _m[i] = [-1, -1]
-        if len(i) != 2:
-            _m[i] = [-len(i)]
-        for j in i:
-            if not isinstance(j, int):
-                m[i][j] = -1
+        if len(_m[i]) != 2:
+            _m[i] = [-len(_m[i])]
+        for j in range(len(_m[i])):
+            if not isinstance(_m[i][j], int):
+                _m[i][j] = -1
 
     return _m
 

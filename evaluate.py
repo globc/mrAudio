@@ -6,7 +6,7 @@ from tqdm import tqdm
 import os
 import ffmpeg
 from tqdm import tqdm
-from utils.utils import post_process, moment_str_to_list
+from utils.utils import convert_percentages_to_second, post_process, moment_str_to_list
 
 class MRDataset(Dataset):
     def __init__(self, processor, vis_root, ann_path):
@@ -31,55 +31,47 @@ class MRDataset(Dataset):
                 stream = ffmpeg.input(video_path)
                 stream = ffmpeg.filter(stream, 'crop', start=start, end=end)
                 output_path = os.path.join(self.vis_root, f"{ann['video']}_clipped.mp4")
-                ffmpeg.output(stream, output_path).run()
+                ffmpeg.output(stream, output_path)
+                ffmpeg.run(stream,overwrite_output=True)
                 video_path = output_path
             except:
                 print("video read error")
                 video_input = None
-
         try:
             video_input = self.processor(video_path, va=True)
         except:
             print("video read error")
             video_input = None
 
-        query = ann["query"]
+        query = ann["query"]  
 
-        query_prompt = "Query: " + query + "\n"
+        example = """"query: <Query> some military patriots takes us through their safety procedures and measures. <Query> 
+                    duration: <Duration> 150 </Duration>
+                    relevant_windows: [[0.80, 0.82], [0.84, 0.94], [0.96, 1]]', 
+                """
 
-        format = """[[x, y],[a,b]] where x,y are the first valid frames of the given query and a,b are also valid frames.
+
+        format_text = """[[x, y],[a,b]]
           if there is only one valid frame use [[x,y]]
-
-          All entries must be a positive number
-          Do not answer in any other format
+          All entries must between 0 and 1
         """
 
-        explaination = "where relevant_windows are the actual frames that are relevant for the given query"
-
-        example = """
-query: some military patriots takes us through their safety procedures and measures. duration: 150 relevant_windows: [[72, 82], [84, 94], [96, 106], [108, 118], [120, 130], [136, 142], [144, 146]]
-query: Man in baseball cap eats before doing his interview. duration: 150 relevant_windows: [[96, 114]]
-query: A man in a white shirt discusses the right to have and carry firearms. duration: 150 relevant_windows: [[48, 50], [76, 120], [122, 138], [140, 146]]
-query: A view of a bamboo fountain of water in a tea house and people scoop from and wash off duration: 150 relevant_windows: [[64, 92]]
-
-"""
+        prompt = f"""
+        Do not hallucinate \n
 
 
-        task_prompt = f"""
-        do not hallucinate
+        Given the following Example: <Example> {example} </Example> \n
+        Only awnswer in the folowing Format: <Format> {format_text} </Format> \n
 
-        Given the following example: {example}
+        
+        Query: <Query> {query} </Query> Duration: <Duration> {ann["duration"]} </Duration> \n
 
-        Explaination: {explaination}
+        please give me the relevant windows matching the Query \n
 
-        Please follow the examples and answer only in the following format: {format}
-
-        The video and the query, find the relevant windows.
-
-        Relevant windows:
+        Relevant Windows: \n
         """
 
-        text_input = query_prompt + "\n" + task_prompt
+        text_input = prompt 
 
         return {
             "video": video_input,
@@ -129,13 +121,18 @@ def run_inference(args):
             print("generation error")
             output = "error"
 
+        raw_out = output
+        output = convert_percentages_to_second(output,150)
+
         pred_relevant_windows = moment_str_to_list(post_process(output))
 
         out = {
+             "raw_out": raw_out,
                 "qid": qids[0],
                 "query": queries[0],
                 "vid": vids[0],
                 "pred_relevant_windows": pred_relevant_windows,
+                "raw_out": raw_out,
                 # "pred_saliency_scores": , # TODO for QVH submission?
             }
         
