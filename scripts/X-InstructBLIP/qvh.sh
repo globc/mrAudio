@@ -3,8 +3,9 @@ OUTPUT_FILE=$HPC_SCRATCH/mrAudio/data/qvh/output.jsonl
 RESULT_FILE=$HPC_SCRATCH/mrAudio/data/qvh/results.json
 
 CUDA_VISIBLE_DEVICES=0 python3 evaluate.py \
-            --model VideoLLaMA \
-            --model-path $HPC_SCRATCH/mrAudio/checkpoints/VideoLLaMA/VideoLLaMA2.1-7B-AV \
+            --model X-InstructBLIP \
+            --model-path $HPC_SCRATCH/mrAudio/checkpoints/X-InstructBLIP/vicuna-7b-v1.1 \
+            --audio-encoder $HPC_SCRATCH/mrAudio/checkpoints/X-InstructBLIP/BEATs_iter3_plus_AS2M.pt \
             --dataset QVH \
             --video-folder $HPC_SCRATCH/mrAudio/data/qvh/videos \
             --annotation-file ${ANNOTATION_FILE} \

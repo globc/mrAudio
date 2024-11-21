@@ -1,7 +1,6 @@
 import argparse
 import json
 from torch.utils.data import Dataset, DataLoader
-from videollama2 import model_init, mm_infer
 from tqdm import tqdm
 import os
 import ffmpeg
@@ -9,8 +8,7 @@ from tqdm import tqdm
 from utils.utils import convert_percentages_to_second, post_process, moment_str_to_list
 
 class MRDataset(Dataset):
-    def __init__(self, processor, vis_root, ann_path):
-        self.processor = processor
+    def __init__(self, vis_root, ann_path):
         self.vis_root = vis_root
 
 
@@ -36,12 +34,8 @@ class MRDataset(Dataset):
                 video_path = output_path
             except:
                 print("video read error")
-                video_input = None
-        try:
-            video_input = self.processor(video_path, va=True)
-        except:
-            print("video read error")
-            video_input = None
+                video_path = None
+
 
         query = ann["query"]  
 
@@ -86,7 +80,7 @@ class MRDataset(Dataset):
         text_input = prompt 
 
         return {
-            "video": video_input,
+            "video": video_path,
             "text": text_input,
             # qid, query & vid necessary for QVH submission
             "qid": ann["qid"],
@@ -95,20 +89,27 @@ class MRDataset(Dataset):
         }
     
 def collate_fn(batch):
-    video  = [x['video'] for x in batch]
+    video_paths  = [x['video'] for x in batch]
     txt = [x['text'] for x in batch]
     qid  = [x['qid'] for x in batch]
     query = [x['query'] for x in batch]
     vid = [x['vid'] for x in batch]
 
-    return video, txt, qid, query, vid
+    return video_paths, txt, qid, query, vid
 
 def run_inference(args):
-    if "VideoLLaMA" in args.model_path:
-        model, processor, tokenizer = model_init(args.model_path)
+
+    if args.model == "X-InstructBLIP":
+        from models.xinstructblip import XInstructBLIP
+        model = XInstructBLIP(args.model_path, args.audio_encoder)
+
+    if args.model == "VideoLLaMA":
+        from models.videollama import VideoLLaMA
+        model = VideoLLaMA(args.model_path)
+        
 
     if args.dataset in ["QVH", "Charades_STA"]:
-        dataset = MRDataset(processor=processor['video'], vis_root=args.video_folder, ann_path=args.annotation_file)
+        dataset = MRDataset(vis_root=args.video_folder, ann_path=args.annotation_file)
 
     dataloader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate_fn)
 
@@ -116,22 +117,8 @@ def run_inference(args):
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     out_file = open(output_file, "w")
 
-    for i, (video_tensors, texts, qids, queries, vids) in enumerate(tqdm(dataloader)):
-        video_tensor = video_tensors[0]
-        text = texts[0]
-
-        try:
-            output = mm_infer(
-                video_tensor,
-                text,
-                model=model,
-                tokenizer=tokenizer,
-                modal='video',
-                do_sample=False,
-            )
-        except:
-            print("generation error")
-            output = "error"
+    for i, (video_paths, texts, qids, queries, vids) in enumerate(tqdm(dataloader)):
+        output = model.generate(video_paths, texts)
 
         raw_out = output
         output = convert_percentages_to_second(output,150)
@@ -156,7 +143,9 @@ def run_inference(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
+    parser.add_argument('--model', help='', required=True)
     parser.add_argument('--model-path', help='', required=True)
+    parser.add_argument('--audio-encoder', help='', required=False)
     parser.add_argument('--video-folder', help='Directory containing video files.', required=True)
     parser.add_argument('--annotation-file', help='Path to the ground truth file containing question.', required=True)
     parser.add_argument('--output-file', help='Directory to save the model results JSON.', required=True)
