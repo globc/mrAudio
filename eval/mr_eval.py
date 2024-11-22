@@ -53,6 +53,8 @@ def compute_mr_ap(
             )
 
     for d in ground_truth:
+        qid = d["qid"]
+        
         # get target windows
         gt_windows = (
             d["relevant_windows"][:max_gt_windows]
