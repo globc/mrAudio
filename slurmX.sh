@@ -30,7 +30,12 @@ export CUDA_NUM_DEVICES=$SLURM_GPUS_ON_NODE
 
 ml gcc/11 python/3.8
 source mraudio/bin/activate
-./scripts/VideoLLaMA/qvh.sh
+pip install git+https://github.com/salesforce/LAVIS --no-deps
+pip install -r requirements_xinstructblip.txt
+####./scripts/X-InstructBLIP/qvh.sh
+####./scripts/X-InstructBLIP/charades_sta.sh
+
+./scripts/X-InstructBLIP/qvh.sh
 deactivate
 
 EXITCODE=$?
