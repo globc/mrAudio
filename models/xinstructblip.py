@@ -2,6 +2,7 @@ from lavis.processors.audio_processors import BeatsAudioProcessor
 from lavis.processors.alpro_processors import AlproVideoEvalProcessor
 from omegaconf import OmegaConf
 from lavis.common.registry import registry
+from transformers import LlamaForCausalLM, LlamaTokenizer
 
 
 
@@ -35,3 +36,61 @@ class XInstructBLIP():
         )
 
         return output[0]
+    
+
+    def forward(self, video_paths, texts):
+        # Freeze QFormers # TODO adapt to X-InstructBLIP (QFormer per modality),...
+        for name, param in self.Qformer.named_parameters():
+            param.requires_grad = False
+            self.query_tokens.requires_grad = False
+            self.t5_proj.requires_grad = False
+
+        # Freeze Encoders
+        for name, param in modality_encoder.named_parameters():
+            param.requires_grad = False
+            modality_encoder = modality_encoder.eval()
+            modality_encoder.train = disabled_train
+
+
+        model_modules = str(self.t5_model.modules)
+        pattern = r"\((\w+)\): Linear"
+        linear_layer_names = re.findall(pattern, model_modules)
+
+        names = []
+        # Print the names of the Linear layers
+        for name in linear_layer_names:
+            names.append(name)
+        target_modules = list(set(names))
+
+
+        lora_config = LoraConfig(
+            r=8,
+            target_modules=target_modules,
+            lora_alpha=8,
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        self.llm_model = get_peft_model(self.llm_model, lora_config)
+        self.llm_model.gradient_checkpointing_enable()
+        self.llm_model.enable_input_require_grads()
+        self.llm_model.lm_head = CastOutputToFloat(self.llm_model.lm_head)
+        self.llm_model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
+        self.llm_hidden_size = self.llm_model.config.hidden_size
+        self.llm_model = get_peft_model(self.llm_model, self.peft_config)
+
+        inputs_embeds = self.llm_model.get_input_embeddings()
+
+
+        outputs = self.llm_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                return_dict=True,
+                labels=targets,
+            )
+        
+        loss = dummy_loss+outputs.loss
+
+
+
+        return {"loss": loss}
