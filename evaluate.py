@@ -1,11 +1,13 @@
 import argparse
 import json
+import os
+
+import ffmpeg
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
-import os
-import ffmpeg
-from tqdm import tqdm
+
 from utils.utils import convert_percentages_to_second, post_process, moment_str_to_list
+
 
 class MRDataset(Dataset):
     def __init__(self, vis_root, ann_path):

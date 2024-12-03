@@ -2,7 +2,7 @@ from lavis.processors.audio_processors import BeatsAudioProcessor
 from lavis.processors.alpro_processors import AlproVideoEvalProcessor
 from omegaconf import OmegaConf
 from lavis.common.registry import registry
-from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer,LlamaTokenizerFast
 from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
 import torch
 import random
@@ -80,6 +80,13 @@ class XInstructBLIP():
             self.emb_cue[modality] = self.llm_model.get_input_embeddings()(self.tokenized_cue[modality].input_ids.to(self.device))
             self.att_cue[modality] = self.tokenized_cue[modality].attention_mask.to(self.device)
 
+        self.llm_tokenizer = LlamaTokenizer.from_pretrained(llm_model, use_fast=False, truncation_side="left")
+        self.llm_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        self.llm_tokenizer.add_special_tokens({'bos_token': '</s>'})
+        self.llm_tokenizer.add_special_tokens({'eos_token': '</s>'})
+        self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
+
+
     def generate(self, video_paths, texts):
         prompt = texts[0]
         video_path = video_paths[0]
@@ -108,10 +115,6 @@ class XInstructBLIP():
         # disable gradient in excess modalities
         dummy_loss = 0.
         for modality in excess_modalities:
-            if self.shared_qformer:
-                for name, param in getattr(self, f"{modality}_encoder_projection").named_parameters():
-                    # param.requires_grad = False
-                    dummy_loss += param.sum()*0.
             for name, param in getattr(self,f"{modality}_ln").named_parameters():
                 # param.requires_grad = False
                 dummy_loss += param.sum()*0.
@@ -138,8 +141,6 @@ class XInstructBLIP():
                     this_frame = data[:,:,j,:,:]
                     with maybe_autocast():
                         embeds[modality].append(ln(encoder(this_frame)))
-                        if self.shared_qformer:
-                            embeds[modality][-1] = getattr(self, f"{modality}_encoder_projection")(embeds[modality][j])
                         data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
                 # B, Token Size, LM EMB
                 query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(data.size(0), -1, -1)
@@ -151,8 +152,6 @@ class XInstructBLIP():
                     this_frame = data[:,j,:,:]
                     with maybe_autocast():
                         embeds[modality].append(ln(encoder(this_frame)))
-                        if self.shared_qformer:
-                            embeds[modality][j] = getattr(self, f"{modality}_encoder_projection")(embeds[modality][j])
                     data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
                 # B, Token Size, LM EMB
                 query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(data.size(0), -1, -1)
