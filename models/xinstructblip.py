@@ -2,35 +2,37 @@ from lavis.processors.audio_processors import BeatsAudioProcessor
 from lavis.processors.alpro_processors import AlproVideoEvalProcessor
 from omegaconf import OmegaConf
 from lavis.common.registry import registry
-from transformers import LlamaForCausalLM, LlamaTokenizer,LlamaTokenizerFast
+from transformers import LlamaForCausalLM, LlamaTokenizer, BitsAndBytesConfig
 from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
 import torch
 import random
 import contextlib
 
-def concat_text_input_output(self, input_ids, input_atts, output_ids, output_atts):
-        input_part_targets_len = []
-        llm_tokens = {"input_ids": [], "attention_mask": []}
-        for i in range(input_ids.size(0)):
-            this_input_ones = input_atts[i].sum()
-            input_part_targets_len.append(this_input_ones)
-            llm_tokens['input_ids'].append(
-                torch.cat([
-                    input_ids[i][:this_input_ones],
-                    output_ids[i][1:],
-                    input_ids[i][this_input_ones:]
-                ])
-            )
-            llm_tokens['attention_mask'].append(
-                torch.cat([
-                    input_atts[i][:this_input_ones],
-                    output_atts[i][1:],
-                    input_atts[i][this_input_ones:]
-                ])
-            )
-        llm_tokens['input_ids'] = torch.stack(llm_tokens['input_ids'])
-        llm_tokens['attention_mask'] = torch.stack(llm_tokens['attention_mask'])
-        return llm_tokens, input_part_targets_len
+from peft import prepare_model_for_kbit_training
+
+def concat_text_input_output(input_ids, input_atts, output_ids, output_atts):
+    input_part_targets_len = []
+    llm_tokens = {"input_ids": [], "attention_mask": []}
+    for i in range(input_ids.size(0)):
+        this_input_ones = input_atts[i].sum()
+        input_part_targets_len.append(this_input_ones)
+        llm_tokens['input_ids'].append(
+            torch.cat([
+                input_ids[i][:this_input_ones],
+                output_ids[i][1:],
+                input_ids[i][this_input_ones:]
+            ])
+        )
+        llm_tokens['attention_mask'].append(
+            torch.cat([
+                input_atts[i][:this_input_ones],
+                output_atts[i][1:],
+                input_atts[i][this_input_ones:]
+            ])
+        )
+    llm_tokens['input_ids'] = torch.stack(llm_tokens['input_ids'])
+    llm_tokens['attention_mask'] = torch.stack(llm_tokens['attention_mask'])
+    return llm_tokens, input_part_targets_len
 
 
 def maybe_autocast(self, dtype=torch.float16):
@@ -52,7 +54,6 @@ class XInstructBLIP():
     
     def __init__(self, model_path, audio_path):
         self.enumerate_inputs = False
-        self.clean_tokenization = False
         self.audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=2, is_eval=False, frame_length=512)
         self.video_processor = AlproVideoEvalProcessor(n_frms=4, image_size=224)
 
@@ -65,12 +66,106 @@ class XInstructBLIP():
         model_cls = registry.get_model_class(self.config.get("model", None).arch)
         self.model =  model_cls.from_config(self.config.get("model", None))
         self.model.to("cuda")
+
+        self.modalities = ["audio", "video"] # TODO set to ["video"] for baselines
+
+
+################################# TODO start
+
+        audio_encoder_kwargs = {
+            "checkpoint_path": audio_path,
+            "load_ln_path": "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"}
+        video_encoder_kwargs = {
+            "image_size": 224,
+            "drop_path_rate": 0,
+            "use_grad_checkpoint": False,
+            "load_ln_path": "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"
+        }
+        self.projection_only_
+        self.video_encoder = self.init_video_encoder("eva_clip_g", precision="fp16", **video_kwargs)
+        s
+        ### Initialize modality enoders ###
+        for modality in self.modalities:
+            modality_model = locals()[f"{modality}_model"]
+            modality_precision = locals()[f"{modality}_precision"]
+            modality_kwargs = 
+            modality_kwargs['load_ln_path'] = locals()[f"pretrained_shared_qformer"] if shared_qformer else \
+                locals()[f"pretrained_{modality}_qformer"]
+            setattr(self, f"projection_only_{modality}", locals()[f"projection_only_{modality}"])
+            setattr(self, f"projection_path_{modality}", locals()[f"projection_path_{modality}"])
+            modality_kwargs['load_ln_type'] = locals()[f"load_ln_type_{modality}"]
+            setattr(self, f"load_ln_type_{modality}", locals()[f"load_ln_type_{modality}"])
+            setattr(self, f"pretrained_{modality}_qformer", locals()[f"pretrained_{modality}_qformer"])
+            modality_encoder, modality_ln = getattr(self, f"init_{modality}_encoder")(
+                modality_model, 
+                precision=modality_precision, 
+                **modality_kwargs     
+            )
+            
+            freeze_modality = locals()[f"freeze_{modality}"]
+            cached_modality = locals()[f"cached_{modality}"]
+            if cached_modality:
+                setattr(self, f"{modality}_encoder", modality_encoder)
+                setattr(self, f"{modality}_ln", modality_ln)
+                continue
+            if freeze_modality:
+                for name, param in modality_encoder.named_parameters():
+                    param.requires_grad = False
+                modality_encoder = modality_encoder.eval()
+                modality_encoder.train = disabled_train
+                logging.info(f"freeze {modality} encoder")
+            
+            setattr(self, f"{modality}_encoder", modality_encoder)
+            setattr(self, f"{modality}_ln", modality_ln)
+            
+######################## TODO end
         
+        self.llm_tokenizer = LlamaTokenizer.from_pretrained(model_path, use_fast=False, truncation_side="left")
+        self.llm_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        self.llm_tokenizer.add_special_tokens({'bos_token': '</s>'})
+        self.llm_tokenizer.add_special_tokens({'eos_token': '</s>'})
+        self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
+
+        if self.finetune:
+            from model_utils import get_peft_config
+            # reduce memory usage by loading model in 4 bit quantization, allowed as model is frozen using LoRA
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+            self.llm_model = LlamaForCausalLM.from_pretrained(
+                llm_model,
+                torch_dtype=torch.float16,
+                quantization_config=quantization_config
+            )
+            self.llm_model.resize_token_embeddings(len(self.llm_tokenizer))
+            
+            # reduce memory usage
+            self.llm_model.gradient_checkpointing_enable()
+            # adjust model for finetuning using low quantization
+            self.llm_model = prepare_model_for_kbit_training(self.llm_model)
+
+            self.llm_model = get_peft_config(self.llm_model)
+
+            # LLM frozen by peft by default
         
+        else:
+            self.llm_model = LlamaForCausalLM.from_pretrained(
+                model_path, torch_dtype=torch.float16
+            )
+            self.llm_model.resize_token_embeddings(len(self.llm_tokenizer))
+
+            # Freeze LLM
+            for name, param in self.llm_model.named_parameters():
+                param.requires_grad = False
+        
+
         self.MODALITY_TO_CUE = {
-        "video": " video: ",
-        "audio": " audio: ",
-    }
+            "video": " video: ",
+            "audio": " audio: ",
+        }
         
         self.tokenized_cue = {}
         self.emb_cue = {}
@@ -80,11 +175,7 @@ class XInstructBLIP():
             self.emb_cue[modality] = self.llm_model.get_input_embeddings()(self.tokenized_cue[modality].input_ids.to(self.device))
             self.att_cue[modality] = self.tokenized_cue[modality].attention_mask.to(self.device)
 
-        self.llm_tokenizer = LlamaTokenizer.from_pretrained(llm_model, use_fast=False, truncation_side="left")
-        self.llm_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        self.llm_tokenizer.add_special_tokens({'bos_token': '</s>'})
-        self.llm_tokenizer.add_special_tokens({'eos_token': '</s>'})
-        self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
+        
 
 
     def generate(self, video_paths, texts):
@@ -209,7 +300,7 @@ class XInstructBLIP():
             padding="longest",
             truncation=True,
             max_length=self.max_txt_len,
-            add_special_tokens= not self.clean_tokenization
+            add_special_tokens=True
         ).to(self.device)
 
         self.llm_tokenizer.truncation_side = 'right'
