@@ -70,73 +70,69 @@ class XInstructBLIP():
         self.modalities = ["audio", "video"] # TODO set to ["video"] for baselines
 
 
-################################# TODO start
-
-        audio_encoder_kwargs = {
-            "checkpoint_path": audio_path,
-            "load_ln_path": "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"}
+        # Init video encoder
+        self.pretrained_video_qformer = "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"
         video_encoder_kwargs = {
             "image_size": 224,
             "drop_path_rate": 0,
             "use_grad_checkpoint": False,
-            "load_ln_path": "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"
+            "load_ln_path": self.pretrained_video_qformer,
+            "load_ln_type": "video"
         }
-        self.projection_only_
-        self.video_encoder = self.init_video_encoder("eva_clip_g", precision="fp16", **video_kwargs)
-        s
-        ### Initialize modality enoders ###
+        self.video_encoder, self.video_ln = self.init_video_encoder("eva_clip_g", precision="fp16", **video_encoder_kwargs)
+        
+        # Freeze video encoder
+        for name, param in self.video_encoder.named_parameters():
+            param.requires_grad = False
+        self.video_encoder = self.video_encoder.eval()
+        self.video_encoder.train = disabled_train
+
+
+        if "audio" in self.modalities: # For baselines w/o audio
+            # Init audio encoder
+            self.pretrained_audio_qformer = "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"
+            audio_encoder_kwargs = {
+                "checkpoint_path": audio_path,
+                "load_ln_path": self.pretrained_audio_qformer,
+                "load_ln_type": "audio"
+            }
+            self.audio_encoder, self.audio_ln = self.init_audio_encoder("beats", precision="fp16", **audio_encoder_kwargs)
+
+            # Freeze audio encoder
+            for name, param in self.audio_encoder.named_parameters():
+                param.requires_grad = False
+            self.audio_encoder = self.audio_encoder.eval()
+            self.audio_encoder.train = disabled_train
+
+
+
+        ##### Init QFormers ####
+        self.tokenizer = self.init_tokenizer(truncation_side="left") # 30523 tokens. 
+        self.num_query_token = 32
+        
         for modality in self.modalities:
-            modality_model = locals()[f"{modality}_model"]
-            modality_precision = locals()[f"{modality}_precision"]
-            modality_kwargs = 
-            modality_kwargs['load_ln_path'] = locals()[f"pretrained_shared_qformer"] if shared_qformer else \
-                locals()[f"pretrained_{modality}_qformer"]
-            setattr(self, f"projection_only_{modality}", locals()[f"projection_only_{modality}"])
-            setattr(self, f"projection_path_{modality}", locals()[f"projection_path_{modality}"])
-            modality_kwargs['load_ln_type'] = locals()[f"load_ln_type_{modality}"]
-            setattr(self, f"load_ln_type_{modality}", locals()[f"load_ln_type_{modality}"])
-            setattr(self, f"pretrained_{modality}_qformer", locals()[f"pretrained_{modality}_qformer"])
-            modality_encoder, modality_ln = getattr(self, f"init_{modality}_encoder")(
-                modality_model, 
-                precision=modality_precision, 
-                **modality_kwargs     
-            )
+            modality_num_features = getattr(self, f"{modality}_encoder").num_features
             
-            freeze_modality = locals()[f"freeze_{modality}"]
-            cached_modality = locals()[f"cached_{modality}"]
-            if cached_modality:
-                setattr(self, f"{modality}_encoder", modality_encoder)
-                setattr(self, f"{modality}_ln", modality_ln)
-                continue
-            if freeze_modality:
-                for name, param in modality_encoder.named_parameters():
-                    param.requires_grad = False
-                modality_encoder = modality_encoder.eval()
-                modality_encoder.train = disabled_train
-                logging.info(f"freeze {modality} encoder")
-            
-            setattr(self, f"{modality}_encoder", modality_encoder)
-            setattr(self, f"{modality}_ln", modality_ln)
-            
-######################## TODO end
+            logging.info(f"Initializing {modality} QFormer and query tokens of length {self.num_query_token}")
+            modality_qformer, modality_query_tokens = self.init_Qformer(
+                self.num_query_token, 
+                modality_num_features,
+                pretrained_qformer=getattr(self, f"pretrained_{modality}_qformer"),
+                load_attention=True,
+                load_qformer_type=modality
+            ) 
+
+            modality_qformer.resize_token_embeddings(len(self.tokenizer))
+            modality_qformer.cls = None
+            setattr(self, f"{modality}_Qformer", modality_qformer)
+            setattr(self, f"{modality}_query_tokens", modality_query_tokens)
+
         
         self.llm_tokenizer = LlamaTokenizer.from_pretrained(model_path, use_fast=False, truncation_side="left")
         self.llm_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
         self.llm_tokenizer.add_special_tokens({'bos_token': '</s>'})
         self.llm_tokenizer.add_special_tokens({'eos_token': '</s>'})
         self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
-
-####################### TODO start
-
-        # Depending on the tokenizer, some numbers are represented as 2 tokens
-        # this is annoying and needs to be fixed
-        # fairly dirty fix, is to just replace them with the closest number that is not "annoying"
-        self.annoying_numbers, _ = self.find_annoying_numbers(self.llm_tokenizer, 200)
-        self.annoying_numbers_replacement_dict = (
-            self.find_annoying_numbers_replacement_dict(self.annoying_numbers)
-        )
-
-############### TODO end
 
 
         if self.finetune:
@@ -160,6 +156,9 @@ class XInstructBLIP():
             # adjust model for finetuning using low quantization
             self.llm_model = prepare_model_for_kbit_training(self.llm_model)
 
+            self.llm_model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
+            self.llm_hidden_size = self.llm_model.config.hidden_size
+
             self.llm_model = get_peft_config(self.llm_model)
 
             # LLM frozen by peft by default
@@ -173,6 +172,23 @@ class XInstructBLIP():
             # Freeze LLM
             for name, param in self.llm_model.named_parameters():
                 param.requires_grad = False
+
+            self.load_projection_video = True
+            self.load_projection_audio = True
+            self.load_projection_type_video = "video"
+            self.load_projection_type_audio = "audio"
+            for modality in self.modalities:
+                load_projection_path = getattr(self, f"pretrained_{modality}_qformer")
+                setattr(self, f"load_projection_{modality}", load_projection_path)
+
+                qformer = getattr(self, f"{modality}_Qformer")
+                proj = self.init_vicuna_projection(
+                    qformer.config.hidden_size, 
+                    self.llm_hidden_size,
+                    load_projection_path=load_projection_path, 
+                    load_projection_type=getattr(self, f"load_projection_type_{modality}")
+                )
+                setattr(self, f"{modality}_llm_proj", proj)
         
 
         self.MODALITY_TO_CUE = {
@@ -215,10 +231,10 @@ class XInstructBLIP():
         random.shuffle(self.modalities)
 
         curr_modalities = [modality for modality in self.modalities if modality in samples]
-        excess_modalities = [modality for modality in self.modalities if modality not in curr_modalities]
-        # disable gradient in excess modalities
+
+        # Freeze QFormers (this way higher compatibility)
         dummy_loss = 0.
-        for modality in excess_modalities:
+        for modality in self.modalities:
             for name, param in getattr(self,f"{modality}_ln").named_parameters():
                 # param.requires_grad = False
                 dummy_loss += param.sum()*0.
