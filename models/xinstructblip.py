@@ -126,6 +126,19 @@ class XInstructBLIP():
         self.llm_tokenizer.add_special_tokens({'eos_token': '</s>'})
         self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
 
+####################### TODO start
+
+        # Depending on the tokenizer, some numbers are represented as 2 tokens
+        # this is annoying and needs to be fixed
+        # fairly dirty fix, is to just replace them with the closest number that is not "annoying"
+        self.annoying_numbers, _ = self.find_annoying_numbers(self.llm_tokenizer, 200)
+        self.annoying_numbers_replacement_dict = (
+            self.find_annoying_numbers_replacement_dict(self.annoying_numbers)
+        )
+
+############### TODO end
+
+
         if self.finetune:
             from model_utils import get_peft_config
             # reduce memory usage by loading model in 4 bit quantization, allowed as model is frozen using LoRA
