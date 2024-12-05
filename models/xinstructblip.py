@@ -1,3 +1,5 @@
+import logging
+
 from lavis.processors.audio_processors import BeatsAudioProcessor
 from lavis.processors.alpro_processors import AlproVideoEvalProcessor
 from omegaconf import OmegaConf
@@ -147,7 +149,7 @@ class XInstructBLIP(Blip2Base):
                 bnb_4bit_compute_dtype=torch.bfloat16,
             )
             self.llm_model = LlamaForCausalLM.from_pretrained(
-                llm_model,
+                model_path,
                 torch_dtype=torch.float16,
                 quantization_config=quantization_config
             )
@@ -261,7 +263,7 @@ class XInstructBLIP(Blip2Base):
                 data_atts[modality] = []
                 for j in range(data.size(2)):
                     this_frame = data[:,:,j,:,:]
-                    with maybe_autocast():
+                    with maybe_autocast(self):
                         embeds[modality].append(ln(encoder(this_frame)))
                         data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
                 # B, Token Size, LM EMB
@@ -272,7 +274,7 @@ class XInstructBLIP(Blip2Base):
                 data_atts[modality] = []
                 for j in range(data.size(1)):
                     this_frame = data[:,j,:,:]
-                    with maybe_autocast():
+                    with maybe_autocast(self):
                         embeds[modality].append(ln(encoder(this_frame)))
                     data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
                 # B, Token Size, LM EMB
@@ -404,7 +406,7 @@ class XInstructBLIP(Blip2Base):
 
        
         
-        with maybe_autocast():
+        with maybe_autocast(self):
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
