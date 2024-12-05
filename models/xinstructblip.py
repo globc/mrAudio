@@ -2,8 +2,9 @@ from lavis.processors.audio_processors import BeatsAudioProcessor
 from lavis.processors.alpro_processors import AlproVideoEvalProcessor
 from omegaconf import OmegaConf
 from lavis.common.registry import registry
-from transformers import LlamaForCausalLM, LlamaTokenizer, BitsAndBytesConfig
+from transformers import LlamaTokenizer, BitsAndBytesConfig
 from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
+from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
 import torch
 import random
 import contextlib
@@ -46,13 +47,14 @@ def maybe_autocast(self, dtype=torch.float16):
         return contextlib.nullcontext()
 
 
-class XInstructBLIP():
+class XInstructBLIP(Blip2Base):
     
     @property
     def device(self):
         return list(self.parameters())[0].device
     
     def __init__(self, model_path, audio_path):
+        super().__init__()
         self.enumerate_inputs = False
         self.audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=2, is_eval=False, frame_length=512)
         self.video_processor = AlproVideoEvalProcessor(n_frms=4, image_size=224)
