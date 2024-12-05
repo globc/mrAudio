@@ -4,6 +4,7 @@ from lavis.processors.audio_processors import BeatsAudioProcessor
 from lavis.processors.alpro_processors import AlproVideoEvalProcessor
 from omegaconf import OmegaConf
 from lavis.common.registry import registry
+from torch._C.cpp.nn import Module
 from transformers import LlamaTokenizer, BitsAndBytesConfig
 from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
 from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
@@ -49,7 +50,7 @@ def maybe_autocast(self, dtype=torch.float16):
         return contextlib.nullcontext()
 
 
-class XInstructBLIP(Blip2Base):
+class XInstructBLIP(Module):
     
     @property
     def device(self):
@@ -210,24 +211,26 @@ class XInstructBLIP(Blip2Base):
 
         
 
-
-    def generate(self, video_paths, texts):
+    def _samples(self, video_paths, texts):
         prompt = texts[0]
         video_path = video_paths[0]
 
 
         audio = self.audio_processor(video_path).unsqueeze(0).to("cuda")
         video = self.video_processor(video_path).unsqueeze(0).to("cuda")
-        
-        samples = {"prompt": prompt, "audio": audio, "video": video}
 
+        return {"prompt": prompt, "audio": audio, "video": video}
+
+
+    def generate(self, video_paths, texts):
         output = self.model.generate(
-            samples
+            self._samples(video_paths, texts),
         )
 
         return output[0]
     
-    def forward(self,samples):
+    def forward(self, video_paths, texts):
+        samples = self._samples(video_paths,texts)
         
         if samples is None or samples == {} or not any([modality in samples for modality in self.modalities]):
             return {"loss": torch.tensor(0.0)}
