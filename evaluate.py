@@ -2,116 +2,33 @@ import argparse
 import json
 import os
 
-import ffmpeg
-from torch.utils.data import Dataset, DataLoader
+from utils.mr_dataset import MRDataset, collate_fn
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from utils.utils import convert_percentages_to_second, post_process, moment_str_to_list
 
 
-class MRDataset(Dataset):
-    def __init__(self, vis_root, ann_path):
-        self.vis_root = vis_root
-
-
-        with open(ann_path, "r") as f:
-            self.annotation = [json.loads(line) for line in f]
-
-    def __len__(self):
-        return len(self.annotation)
-    
-    def __getitem__(self, index):
-        ann = self.annotation[index]
-
-        video_path = os.path.join(self.vis_root, ann["vid"] + ".mp4")
-        if "start" in ann:
-            start, end = float(ann["start"]), float(ann["end"])
-
-            try:
-                stream = ffmpeg.input(video_path)
-                stream = ffmpeg.filter(stream, 'crop', start=start, end=end)
-                output_path = os.path.join(self.vis_root, f"{ann['video']}_clipped.mp4")
-                ffmpeg.output(stream, output_path)
-                ffmpeg.run(stream,overwrite_output=True)
-                video_path = output_path
-            except:
-                print("video read error")
-                video_path = None
-
-
-        query = ann["query"]  
-
-        example = """"
-                    query: <Query> some military patriots takes us through their safety procedures and measures. <Query> 
-                    duration: <Duration> 150 </Duration>
-                    relevant_windows: [[0.80, 0.83], [0.84, 0.94]]', 
-
-                    query: <Query> Man in baseball cap eats before doing his interview. <Query> 
-                    duration:  <Duration> 150  </Duration> 
-                    relevant_windows: [[0.96, 1]]'
-
-                    query: <Query> A view of a bamboo fountain of water in a tea house and people scoop from and wash off <Query> 
-                    duration:  <Duration> 150  </Duration> 
-                    relevant_windows: [[0.21, 0.99]]'
-
-                    query: <Query> The weather map shows snowfall <Query> 
-                    duration:  <Duration> 150  </Duration> 
-                    relevant_windows: [[0.12, 0.17],[0.27, 0.30],[0.32, 0.42],[0.43, 0.50],[0.68, 0.70],[0.80, 0.82]]'
-                """
-
-
-        format_text = """[[x, y],[a,b],[c,d]]
-            if there is only one valid frame use [[x,y]]
-            they represent the persentages of the video duration
-            Ensure that the windows are in ascending order and do not overlap.
-        """
-
-        prompt = f"""
-        Do not hallucinate \n
-        follow the flowing text as accurate as possible \n
-
-        Example: <Example> {example} </Example> \n
-        Format: <Format> {format_text} </Format> \n
-        Query: <Query> {query} </Query> 
-        Duration: <Duration> {ann["duration"]} </Duration> \n
-
-        For die video give me the relevant windows matching the Query for the given duration \n
-        relevant_windows:  \n
-        """
-
-        text_input = prompt 
-
-        return {
-            "video": video_path,
-            "text": text_input,
-            # qid, query & vid necessary for QVH submission
-            "qid": ann["qid"],
-            "query": query,
-            "vid": ann["vid"],
-        }
-    
-def collate_fn(batch):
-    video_paths  = [x['video'] for x in batch]
-    txt = [x['text'] for x in batch]
-    qid  = [x['qid'] for x in batch]
-    query = [x['query'] for x in batch]
-    vid = [x['vid'] for x in batch]
-
-    return video_paths, txt, qid, query, vid
-
 def run_inference(args):
 
     if args.model == "X-InstructBLIP":
         from models.xinstructblip import XInstructBLIP
+        from lavis.processors.audio_processors import BeatsAudioProcessor
+        from lavis.processors.alpro_processors import AlproVideoEvalProcessor
         model = XInstructBLIP(args.model_path, args.audio_encoder)
+        video_processor = AlproVideoEvalProcessor(n_frms=4, image_size=224)
+        audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=4, is_eval=False, frame_length=512)
+        
 
     if args.model == "VideoLLaMA":
         from models.videollama import VideoLLaMA
         model = VideoLLaMA(args.model_path)
+        video_processor = model.processor
+        audio_processor = None
         
 
     if args.dataset in ["QVH", "Charades_STA"]:
-        dataset = MRDataset(vis_root=args.video_folder, ann_path=args.annotation_file)
+        dataset = MRDataset(vis_root=args.video_folder, ann_path=args.annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
 
     dataloader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate_fn)
 
@@ -119,19 +36,20 @@ def run_inference(args):
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     out_file = open(output_file, "w")
 
-    for i, (video_paths, texts, qids, queries, vids) in enumerate(tqdm(dataloader)):
-        output = model.generate(video_paths, texts)
+    for i, samples in enumerate(tqdm(dataloader)):
+        output = model.generate(samples)
 
         raw_out = output
         output = convert_percentages_to_second(output,150)
 
         pred_relevant_windows = moment_str_to_list(post_process(output))
 
+        # TODO batch_size > 1
         out = {
                 "raw_out": raw_out,
-                "qid": qids[0],
-                "query": queries[0],
-                "vid": vids[0],
+                "qid": samples["qids"][0],
+                "query": samples["query"][0],
+                "vid": samples["vid"][0],
                 "pred_relevant_windows": pred_relevant_windows,
                 "raw_out": raw_out,
                 # "pred_saliency_scores": , # TODO for QVH submission?

@@ -5,18 +5,14 @@ class VideoLLaMA():
     def __init__(self, path):
         self.model, self.processor, self.tokenizer = model_init(path)
 
-    def generate(self, video_paths, texts):
+    def generate(self, samples):
         
-        try:
-            video_tensor = self.processor(video_paths[0], va=True)
-        except:
-            print("video read error")
-            video_tensor = None
+        
 
         try:
             output = mm_infer(
-                video_tensor,
-                texts[0],
+                samples["video"][0],
+                samples["text_input"][0],
                 model=self.model,
                 tokenizer=self.tokenizer,
                 modal='video',

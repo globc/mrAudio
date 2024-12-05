@@ -1,16 +1,19 @@
 import logging
-
-from lavis.processors.audio_processors import BeatsAudioProcessor
-from lavis.processors.alpro_processors import AlproVideoEvalProcessor
-from omegaconf import OmegaConf
-from lavis.common.registry import registry
-from torch._C.cpp.nn import Module
-from transformers import LlamaTokenizer, BitsAndBytesConfig
-from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
-from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
+import os
+import torch.nn as nn
 import torch
 import random
 import contextlib
+
+from transformers import LlamaTokenizer, BitsAndBytesConfig
+from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
+from lavis.models.blip2_models.blip2 import disabled_train
+
+from lavis.common.utils import is_url
+from lavis.models.blip2_models.Qformer import BertConfig, BertLMHeadModel
+from lavis.common.dist_utils import download_cached_file
+from lavis.models.eva_vit import create_eva_vit_g
+from transformers import BertTokenizer
 
 from peft import prepare_model_for_kbit_training
 
@@ -50,7 +53,7 @@ def maybe_autocast(self, dtype=torch.float16):
         return contextlib.nullcontext()
 
 
-class XInstructBLIP(Module):
+class XInstructBLIP(nn.Module):
     
     @property
     def device(self):
@@ -59,18 +62,6 @@ class XInstructBLIP(Module):
     def __init__(self, model_path, audio_path):
         super().__init__()
         self.enumerate_inputs = False
-        self.audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=2, is_eval=False, frame_length=512)
-        self.video_processor = AlproVideoEvalProcessor(n_frms=4, image_size=224)
-
-        # from lavis.models import load_model
-        # self.model = load_model("blip2_vicuna_xinstruct", "vicuna7b")
-
-        self.config = OmegaConf.load("./models/vicuna7b_v2.yaml")
-        self.config.get("model", None).llm_model = model_path
-        self.config.get("model", None).audio_encoder_kwargs = {"checkpoint_path": audio_path}
-        model_cls = registry.get_model_class(self.config.get("model", None).arch)
-        self.model =  model_cls.from_config(self.config.get("model", None))
-        self.model.to("cuda")
 
         self.modalities = ["audio", "video"] # TODO set to ["video"] for baselines
 
@@ -178,22 +169,22 @@ class XInstructBLIP(Module):
             for name, param in self.llm_model.named_parameters():
                 param.requires_grad = False
 
-            self.load_projection_video = True
-            self.load_projection_audio = True
-            self.load_projection_type_video = "video"
-            self.load_projection_type_audio = "audio"
-            for modality in self.modalities:
-                load_projection_path = getattr(self, f"pretrained_{modality}_qformer")
-                setattr(self, f"load_projection_{modality}", load_projection_path)
+        self.load_projection_video = True
+        self.load_projection_audio = True
+        self.load_projection_type_video = "video"
+        self.load_projection_type_audio = "audio"
+        for modality in self.modalities:
+            load_projection_path = getattr(self, f"pretrained_{modality}_qformer")
+            setattr(self, f"load_projection_{modality}", load_projection_path)
 
-                qformer = getattr(self, f"{modality}_Qformer")
-                proj = self.init_vicuna_projection(
-                    qformer.config.hidden_size, 
-                    self.llm_hidden_size,
-                    load_projection_path=load_projection_path, 
-                    load_projection_type=getattr(self, f"load_projection_type_{modality}")
-                )
-                setattr(self, f"{modality}_llm_proj", proj)
+            qformer = getattr(self, f"{modality}_Qformer")
+            proj = self.init_vicuna_projection(
+                qformer.config.hidden_size, 
+                self.llm_hidden_size,
+                load_projection_path=load_projection_path, 
+                load_projection_type=getattr(self, f"load_projection_type_{modality}")
+            )
+            setattr(self, f"{modality}_llm_proj", proj)
         
 
         self.MODALITY_TO_CUE = {
@@ -211,26 +202,13 @@ class XInstructBLIP(Module):
 
         
 
-    def _samples(self, video_paths, texts):
-        prompt = texts[0]
-        video_path = video_paths[0]
 
+    def generate(self, samples):
+        # TODO
 
-        audio = self.audio_processor(video_path).unsqueeze(0).to("cuda")
-        video = self.video_processor(video_path).unsqueeze(0).to("cuda")
-
-        return {"prompt": prompt, "audio": audio, "video": video}
-
-
-    def generate(self, video_paths, texts):
-        output = self.model.generate(
-            self._samples(video_paths, texts),
-        )
-
-        return output[0]
+        return samples
     
-    def forward(self, video_paths, texts):
-        samples = self._samples(video_paths,texts)
+    def forward(self, samples):
         
         if samples is None or samples == {} or not any([modality in samples for modality in self.modalities]):
             return {"loss": torch.tensor(0.0)}
@@ -295,21 +273,21 @@ class XInstructBLIP(Module):
         
         Qformer_atts = {}
         query_atts = {}
-        
+        num = {}
         for modality in curr_modalities:
             # B, Token Size
             query_atts[modality] = torch.ones(query_tokens[modality].size()[:-1], dtype=torch.long).to(self.device)
             # B, Token Size + Inp Size
             Qformer_atts[modality] = torch.cat([query_atts[modality],text_Qformer.attention_mask],dim=1)
-            num = len(embeds[modality])
+            num[modality] = len(embeds[modality])
             bs = embeds[modality][0].shape[0]
-            indices = [j_+r for r,j in enumerate([[i*bs for i in range(num)]]*bs) for j_ in j]
+            indices = [j_+r for r,j in enumerate([[i*bs for i in range(num[modality])]]*bs) for j_ in j]
             reordered_embeds = torch.cat(embeds[modality])[indices]
             reordered_atts = torch.cat(data_atts[modality])[indices]
             query_output = getattr(self, f"{modality}_Qformer").bert(
-                text_Qformer.input_ids.repeat(num, 1),
-                attention_mask=Qformer_atts[modality].repeat(num, 1),
-                query_embeds=query_tokens[modality].repeat(num, 1, 1),
+                text_Qformer.input_ids.repeat(num[modality], 1),
+                attention_mask=Qformer_atts[modality].repeat(num[modality], 1),
+                query_embeds=query_tokens[modality].repeat(num[modality], 1, 1),
                 encoder_hidden_states=reordered_embeds,
                 encoder_attention_mask=reordered_atts,
                 return_dict=True,
@@ -320,10 +298,10 @@ class XInstructBLIP(Module):
         inputs_llm = {}
         atts_llm = {}
         for modality in curr_modalities:
-                inputs_llm[modality] = getattr(self, f"{modality}_llm_proj")(query_outputs[modality].last_hidden_state[:,:query_tokens[modality].size(1),:]) 
-                # bs, num, num query tokens, llm emb size -> bs, num*num query tokens, llm emb size
-                inputs_llm[modality] = inputs_llm[modality].reshape(bs, num, self.num_query_token, -1).view(bs, num*self.num_query_token, -1)
-                atts_llm[modality] =  torch.ones(inputs_llm[modality].size()[:-1], dtype=torch.long).to(self.device)   
+            inputs_llm[modality] = getattr(self, f"{modality}_llm_proj")(query_outputs[modality].last_hidden_state[:,:query_tokens[modality].size(1),:]) 
+            # bs, num, num query tokens, llm emb size -> bs, num*num query tokens, llm emb size
+            inputs_llm[modality] = inputs_llm[modality].reshape(bs, num[modality], self.num_query_token, -1).view(bs, num[modality]*self.num_query_token, -1)
+            atts_llm[modality] =  torch.ones(inputs_llm[modality].size()[:-1], dtype=torch.long).to(self.device)   
         
         
 
@@ -422,3 +400,140 @@ class XInstructBLIP(Module):
 
 
         return {"loss": loss}
+
+    @classmethod
+    def init_tokenizer(cls, truncation_side="right"):
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side)
+        tokenizer.add_special_tokens({"bos_token": "[DEC]"})
+        return tokenizer
+
+    @classmethod
+    def init_Qformer(cls, num_query_token, modality_width, cross_attention_freq=2, pretrained_qformer=None, load_attention=False, load_qformer_type=""):
+        encoder_config = BertConfig.from_pretrained("bert-base-uncased")
+        encoder_config.encoder_width = modality_width
+        # insert cross-attention layer every other block
+        encoder_config.add_cross_attention = True
+        encoder_config.cross_attention_freq = cross_attention_freq
+        encoder_config.query_length = num_query_token
+        encoder_config.vocab_size += 1 # for special token [DEC]
+        Qformer = BertLMHeadModel(config=encoder_config)
+        query_tokens = nn.Parameter(
+            torch.zeros(1, num_query_token, encoder_config.hidden_size)
+        )
+        query_tokens.data.normal_(mean=0.0, std=encoder_config.initializer_range)
+
+        if pretrained_qformer:
+            url_or_filename=pretrained_qformer
+            logging.info(f"Loading pretrained qformer weights and query tokens from {url_or_filename} of type {load_qformer_type}")
+            if is_url(url_or_filename):
+                cached_file = download_cached_file(
+                    url_or_filename, check_hash=False, progress=True
+                )
+                checkpoint = torch.load(cached_file, map_location="cpu")
+            elif os.path.isfile(url_or_filename):
+                checkpoint = torch.load(url_or_filename, map_location="cpu")
+            else:
+                raise RuntimeError("checkpoint url or path is invalid")
+            
+            if load_qformer_type:
+                load_qformer_type = f"{load_qformer_type}_"
+            loaded_state_dict = {}
+            if 'model' in checkpoint:
+                checkpoint = checkpoint['model'] 
+            for k in checkpoint.keys():
+                if load_qformer_type+'Qformer.' in k:
+                    if not load_attention and 'attention' in k:
+                        continue
+                    loaded_state_dict['.'.join(k.split('.')[1:])] = checkpoint[k]
+            Qformer.load_state_dict(loaded_state_dict, strict=False)
+            query_tokens.data = checkpoint[load_qformer_type+'query_tokens']
+        
+        return Qformer, query_tokens
+
+
+    def init_video_encoder(self, model_name, precision, **kwargs):
+        assert model_name == "eva_clip_g"
+        video_encoder = create_eva_vit_g(
+                kwargs['image_size'], kwargs['drop_path_rate'], kwargs['use_grad_checkpoint'], precision
+            )
+
+        ln_video = self.init_ln(video_encoder.num_features, load_ln_path=kwargs['load_ln_path'], load_ln_type=kwargs['load_ln_type'])
+
+        return video_encoder, ln_video
+
+    def init_audio_encoder(self, model_name, precision, **kwargs):
+        assert model_name == "beats"
+        from lavis.models.beats_encoder import BeatsEncoder
+        audio_encoder = BeatsEncoder(**kwargs)
+        ln_audio = self.init_ln(audio_encoder.num_features, load_ln_path=kwargs["load_ln_path"], load_ln_type=kwargs["load_ln_type"])
+
+        return audio_encoder, ln_audio
+
+    @classmethod
+    def init_ln(cls, num_features, load_ln_path=False, load_ln_type=""):
+        ln = LayerNorm(num_features)
+        if load_ln_path and load_ln_type:
+            url_or_filename=load_ln_path
+            logging.info(f"Loading pretrained layer norm weights from {url_or_filename} of type {load_ln_type}")
+            if is_url(url_or_filename):
+                cached_file = download_cached_file(
+                    url_or_filename, check_hash=False, progress=True
+                )
+                checkpoint = torch.load(cached_file, map_location="cpu")
+            elif os.path.isfile(url_or_filename):
+                checkpoint = torch.load(url_or_filename, map_location="cpu")
+            else:
+                raise RuntimeError("checkpoint url or path is invalid")
+            
+            if load_ln_type:
+                load_ln_type = f"{load_ln_type}_ln" if "vision" not in load_ln_type else "ln_vision"
+            loaded_state_dict = {}
+            if 'model' in checkpoint:
+                checkpoint = checkpoint['model'] 
+            for k in checkpoint.keys():
+                if load_ln_type in k:
+                    loaded_state_dict['.'.join(k.split('.')[1:])] = checkpoint[k]
+            ln.load_state_dict(loaded_state_dict, strict=False)
+        
+        return ln
+    
+    @classmethod
+    def init_vicuna_projection(cls, input_size, output_size, load_projection_path=False, load_projection_type="", projection_key=None):
+        proj = nn.Linear(input_size, output_size)
+        if load_projection_path:
+            url_or_filename=load_projection_path
+            logging.info(f"Loading pretrained projection weights from {url_or_filename} of type {load_projection_type} with key {projection_key if projection_key else load_projection_type+'_llm_proj.'}")
+            if is_url(url_or_filename):
+                cached_file = download_cached_file(
+                    url_or_filename, check_hash=False, progress=True
+                )
+                checkpoint = torch.load(cached_file, map_location="cpu")
+            elif os.path.isfile(url_or_filename):
+                checkpoint = torch.load(url_or_filename, map_location="cpu")
+            else:
+                raise RuntimeError("checkpoint url or path is invalid")
+            if load_projection_type:
+                load_projection_type = f"{load_projection_type}_"
+            loaded_state_dict = {}
+            if 'model' in checkpoint:
+                checkpoint = checkpoint['model'] 
+            for k in checkpoint.keys():
+                if projection_key:
+                    if projection_key in k:
+                        loaded_state_dict['.'.join(k.split('.')[1:])] = checkpoint[k]
+                else:
+                    if load_projection_type+'llm_proj.' in k:
+                        loaded_state_dict['.'.join(k.split('.')[1:])] = checkpoint[k]
+            proj.load_state_dict(loaded_state_dict, strict=False)
+        
+        return proj
+
+class LayerNorm(nn.LayerNorm):
+    """Subclass torch's LayerNorm to handle fp16."""
+
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        ret = super().forward(x.type(torch.float32))
+        return ret.type(orig_type)
+
+

@@ -2,13 +2,27 @@ import argparse
 import time
 import torch
 import wandb
+import lavis
 from torch._C.cpp.nn import Module
-from mrAudio.evaluate import MRDataset, collate_fn
+from utils.mr_dataset import MRDataset, collate_fn
 from torch.utils.data import  DataLoader
 import torch.optim as optim
-from mrAudio.utils.utils import prepare_sample
+from utils.utils import prepare_sample
 from torch.optim.lr_scheduler import LRScheduler
 import torch.distributed as dist
+
+from lavis.common.logger import MetricLogger, SmoothedValue
+import annotator.uniformer.mmcv as mmcv
+
+import logging
+
+import os.path as osp
+
+from lavis.common.annotator.uniformer.mmcv.runner.checkpoint import save_checkpoint ,load_checkpoint
+
+
+import torch.utils.data.sampler
+
 
 def train(model,start_epoch:int,max_epoch:int,valid_splits:[],val_freq:int,data_loader:DataLoader,evaluate_only:bool=False):
     start_time = time.time()
@@ -32,6 +46,19 @@ def train(model,start_epoch:int,max_epoch:int,valid_splits:[],val_freq:int,data_
             for split_name in valid_splits:
                 train_epoch(epoch=cur_epoch,model=model,iters_per_epoch=int(len(valid_splits)/val_freq),data_loader=data_loader,lr_scheduler=lr_scheduler,optimizer=optimizer)
 
+            
+            # eval_epoch
+            results = eval_submission()
+
+
+            ## if eval good then 
+
+            save_checkpoint(model,f"{cur_epoch}_name",torch.load)
+
+
+            ## if veal bad load previos
+
+            load_checkpoint(model,f"{cur_epoch-1}_name",torch.load)
 
 def train_epoch(
         epoch,
@@ -48,14 +75,29 @@ def train_epoch(
     
     model.train()  ## missing
 
-    losses = []
-    for i in range(iters_per_epoch):
-        samples = next(data_loader)
-        if start_iters is None:
-            inner_epoch = epoch
-        else:
 
-            inner_epoch = start_iters // iters_per_epoch
+    metric_logger = MetricLogger(delimiter="  ")
+    metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
+    metric_logger.add_meter("loss", SmoothedValue(window_size=1, fmt="{value:.4f}"))
+
+    logging.info(
+        "Start training epoch {}, {} iters per inner epoch.".format(
+            epoch, iters_per_epoch
+        )
+    )
+
+    header = "Train: data epoch: [{}]".format(epoch)
+
+    inner_epoch = start_iters // iters_per_epoch
+    header = header + "; inner epoch [{}]".format(inner_epoch)
+
+
+    for i in metric_logger.log_every(range(iters_per_epoch), log_freq, header):
+        # if using iter-based runner, we stop after iters_per_epoch iterations.
+        if i >= iters_per_epoch:
+            break
+
+        samples = next(data_loader)
 
         samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
         samples.update(
@@ -66,22 +108,22 @@ def train_epoch(
             }
         )
 
-
-
         lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
 
-        with torch.cuda.amp.autocast(enabled=True):
-            loss = model.forward(**samples)
-            losses.append(loss)
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            loss = model.forward(samples)
 
         scaler.scale(loss).backward()
+        
 
-
+        # update gradients every accum_grad_iters iterations
         if (i + 1) % accum_grad_iters == 0:
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
 
+        metric_logger.update(loss=loss.item())
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
         # log to wandb
         if dist.get_rank() == 0 and wandb.run is not None:
@@ -90,7 +132,13 @@ def train_epoch(
                     "train/lr": optimizer.param_groups[0]["lr"],
                 }
             )
-    return losses
+    metric_logger.synchronize_between_processes()
+    logging.info("Averaged stats: " + str(metric_logger.global_avg()))
+
+    return {
+        k: "{:.3f}".format(meter.global_avg)
+        for k, meter in metric_logger.meters.items()
+    }
 
 def run_train(args):
 
