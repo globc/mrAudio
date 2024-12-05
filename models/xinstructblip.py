@@ -1,6 +1,14 @@
-import logging
-import os
-import torch.nn as nn
+from lavis.processors.audio_processors import BeatsAudioProcessor
+from lavis.processors.alpro_processors import AlproVideoEvalProcessor
+from omegaconf import OmegaConf
+from lavis.common.registry import registry
+from transformers import LlamaTokenizer, BitsAndBytesConfig
+from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
+
+from lavis.common.utils import is_url
+from lavis.models.blip2_models.Qformer import BertConfig, BertLMHeadModel
+from lavis.common.dist_utils import download_cached_file
+from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
 import torch
 import random
 import contextlib
@@ -508,7 +516,7 @@ class XInstructBLIP(nn.Module):
         att_list = []
         inp_list = []
         # joint video audio TODO add seconds
-        for pos in range(num['video']):
+        for pos in range(len(embeds['video'])):
             if self.enumerate_inputs:
                 enumeration_pos = self.llm_tokenizer(
                     [f"{'' if pos == 0 else ' '}({chr(97+pos)}) " for _ in prompt],
@@ -522,8 +530,8 @@ class XInstructBLIP(nn.Module):
 
             
             for modality in ['video', 'audio']:
-                att_list.extend([torch.tensor(self.tokenized_cue[modality].attention_mask).to(self.device).repeat(atts_llm[modality].shape[0], 1), atts_llm[modality].view(bs,  num[modality], self.num_query_token)[:, pos, :]])
-                inp_list.extend([self.emb_cue[modality].to(self.device).repeat(inputs_llm[modality].shape[0], 1, 1), inputs_llm[modality].view(bs,  num[modality], self.num_query_token, -1)[:, pos, :, :]])
+                att_list.extend([torch.tensor(self.tokenized_cue[modality].attention_mask).to(self.device).repeat(atts_llm[modality].shape[0], 1), atts_llm[modality].view(bs, len(embeds[modality]), self.num_query_token)[:, pos, :]])
+                inp_list.extend([self.emb_cue[modality].to(self.device).repeat(inputs_llm[modality].shape[0], 1, 1), inputs_llm[modality].view(bs, len(embeds[modality]), self.num_query_token, -1)[:, pos, :, :]])
              
             if self.interleave_seconds:
                 assert len(samples["timestamps"][0]) == num["video"]
@@ -572,13 +580,11 @@ class XInstructBLIP(nn.Module):
                 labels=targets,
             )
 
-        return {"loss": outputs.loss}
+        loss = dummy_loss+outputs.loss
 
-    @classmethod
-    def init_tokenizer(cls, truncation_side="right"):
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side)
-        tokenizer.add_special_tokens({"bos_token": "[DEC]"})
-        return tokenizer
+
+
+        return {"loss": loss}
 
     @classmethod
     def init_Qformer(cls, num_query_token, modality_width, cross_attention_freq=2, pretrained_qformer=None, load_attention=False, load_qformer_type=""):
@@ -622,172 +628,3 @@ class XInstructBLIP(nn.Module):
             query_tokens.data = checkpoint[load_qformer_type+'query_tokens']
         
         return Qformer, query_tokens
-
-
-    def init_video_encoder(self, model_name, precision, **kwargs):
-        assert model_name == "eva_clip_g"
-        video_encoder = create_eva_vit_g(
-                kwargs['image_size'], kwargs['drop_path_rate'], kwargs['use_grad_checkpoint'], precision
-            )
-
-        ln_video = self.init_ln(video_encoder.num_features, load_ln_path=kwargs['load_ln_path'], load_ln_type=kwargs['load_ln_type'])
-
-        return video_encoder, ln_video
-
-    def init_audio_encoder(self, model_name, precision, **kwargs):
-        assert model_name == "beats"
-        from lavis.models.beats_encoder import BeatsEncoder
-        audio_encoder = BeatsEncoder(**kwargs)
-        ln_audio = self.init_ln(audio_encoder.num_features, load_ln_path=kwargs["load_ln_path"], load_ln_type=kwargs["load_ln_type"])
-
-        return audio_encoder, ln_audio
-
-    @classmethod
-    def init_ln(cls, num_features, load_ln_path=False, load_ln_type=""):
-        ln = LayerNorm(num_features)
-        if load_ln_path and load_ln_type:
-            url_or_filename=load_ln_path
-            logging.info(f"Loading pretrained layer norm weights from {url_or_filename} of type {load_ln_type}")
-            if is_url(url_or_filename):
-                cached_file = download_cached_file(
-                    url_or_filename, check_hash=False, progress=True
-                )
-                checkpoint = torch.load(cached_file, map_location="cpu")
-            elif os.path.isfile(url_or_filename):
-                checkpoint = torch.load(url_or_filename, map_location="cpu")
-            else:
-                raise RuntimeError("checkpoint url or path is invalid")
-            
-            if load_ln_type:
-                load_ln_type = f"{load_ln_type}_ln" if "vision" not in load_ln_type else "ln_vision"
-            loaded_state_dict = {}
-            if 'model' in checkpoint:
-                checkpoint = checkpoint['model'] 
-            for k in checkpoint.keys():
-                if load_ln_type in k:
-                    loaded_state_dict['.'.join(k.split('.')[1:])] = checkpoint[k]
-            ln.load_state_dict(loaded_state_dict, strict=False)
-        
-        return ln
-    
-    @classmethod
-    def init_vicuna_projection(cls, input_size, output_size, load_projection_path=False, load_projection_type="", projection_key=None):
-        proj = nn.Linear(input_size, output_size)
-        if load_projection_path:
-            url_or_filename=load_projection_path
-            logging.info(f"Loading pretrained projection weights from {url_or_filename} of type {load_projection_type} with key {projection_key if projection_key else load_projection_type+'_llm_proj.'}")
-            if is_url(url_or_filename):
-                cached_file = download_cached_file(
-                    url_or_filename, check_hash=False, progress=True
-                )
-                checkpoint = torch.load(cached_file, map_location="cpu")
-            elif os.path.isfile(url_or_filename):
-                checkpoint = torch.load(url_or_filename, map_location="cpu")
-            else:
-                raise RuntimeError("checkpoint url or path is invalid")
-            if load_projection_type:
-                load_projection_type = f"{load_projection_type}_"
-            loaded_state_dict = {}
-            if 'model' in checkpoint:
-                checkpoint = checkpoint['model'] 
-            for k in checkpoint.keys():
-                if projection_key:
-                    if projection_key in k:
-                        loaded_state_dict['.'.join(k.split('.')[1:])] = checkpoint[k]
-                else:
-                    if load_projection_type+'llm_proj.' in k:
-                        loaded_state_dict['.'.join(k.split('.')[1:])] = checkpoint[k]
-            proj.load_state_dict(loaded_state_dict, strict=False)
-        
-        return proj
-    
-    def get_state_dict(self, url_or_filename, **kwargs):
-        if is_url(url_or_filename):
-            cached_file = download_cached_file(
-                url_or_filename, check_hash=False, progress=True
-            )
-            checkpoint = torch.load(cached_file, map_location="cpu")
-        elif os.path.isfile(url_or_filename):
-            checkpoint = torch.load(url_or_filename, map_location="cpu")
-        else:
-            raise RuntimeError("checkpoint url or path is invalid")
-
-        if "model" in checkpoint.keys():
-            state_dict = checkpoint["model"]
-        else:
-            state_dict = checkpoint
-        return state_dict
-    
-    def load_from_pretrained(self, url_or_filename, **kwargs):
-        state_dict = self.get_state_dict(url_or_filename)
-        self.load_state_dict(state_dict, strict=False)
-        logging.info("load checkpoint from %s" % url_or_filename)
-
-    def load_checkpoint(self, url_or_filename, **kwargs):
-        """
-        Load from a finetuned checkpoint.
-
-        This should expect no mismatch in the model keys and the checkpoint keys.
-        """
-        state_dict = self.get_state_dict(url_or_filename)
-        self.load_state_dict(state_dict, strict=True)
-        logging.info("load checkpoint from %s" % url_or_filename)
-    
-    def load_state_dict(self, state_dict, strict=True):
-        # from pdb import set_trace; set_trace()
-        unexpected_keys = []
-        missing_keys = []
-        
-        for modality in self.modalities:
-            ## Load Q-Former if not loaded from config
-            if not getattr(self, f"pretrained_{modality}_qformer"):
-
-                modality_qformer_state_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"{modality}_Qformer" == k.split('.')[0]}
-                msg = getattr(self, f"{modality}_Qformer").load_state_dict(modality_qformer_state_dict, strict=strict)
-                missing_keys.extend(msg.missing_keys)
-                unexpected_keys.extend(msg.unexpected_keys)
-
-                ## Load query tokens
-                if f"{modality}_query_tokens" not in state_dict:
-                    missing_keys.append(f"{modality}_query_tokens")
-                else:
-                    logging.info(f"Loaded {modality} query tokens")
-                    getattr(self, f"{modality}_query_tokens").data =  state_dict[f"{modality}_query_tokens"]
-
-                # load modality layer norm if not loaded from config
-                modality_ln_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"{modality}_ln" in k.split('.')[0]}
-
-                msg = getattr(self, f"{modality}_ln").load_state_dict(modality_ln_dict, strict=strict)
-                missing_keys.extend(msg.missing_keys)
-                unexpected_keys.extend(msg.unexpected_keys)
-
-            ## Load LLM projections if not loaded from config
-            if not getattr(self, f"load_projection_{modality}"):
-                if not getattr(self, f"projection_path_{modality}"):
-                    logging.info(f"Loaded {modality} llm  projection")
-                    modality_llm_projection_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"{modality}_llm_proj" in k.split('.')[0]}
-                    msg = getattr(self, f"{modality}_llm_proj").load_state_dict(modality_llm_projection_dict, strict=strict)
-                    missing_keys.extend(msg.missing_keys)
-                    unexpected_keys.extend(msg.unexpected_keys)
-        
-        ## llm model is loaded from pretrained
-        lora_state_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"llm_model" in k.split('.')[0]}
-
-        if not self.lora or len(lora_state_dict) == 0:
-            unexpected_keys = [k for k in unexpected_keys if k.split('.')[0] != 'llm_model']
-        else:
-            msg = self.llm_model.load_state_dict({'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"llm_model" in k.split('.')[0]}, strict=False)
-            missing_keys.extend(["llm_model."+k for k in msg.missing_keys])
-        missing_keys = [k for k in missing_keys if 'encoder' not in k.split('.')[0]]
-        missing_keys = [k for k in missing_keys if k.split('.')[0] != 'llm_model']
-        return _IncompatibleKeys(missing_keys, unexpected_keys)
-
-class LayerNorm(nn.LayerNorm):
-    """Subclass torch's LayerNorm to handle fp16."""
-
-    def forward(self, x: torch.Tensor):
-        orig_type = x.dtype
-        ret = super().forward(x.type(torch.float32))
-        return ret.type(orig_type)
-
-

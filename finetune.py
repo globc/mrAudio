@@ -1,53 +1,162 @@
-import argparse
-from utils.trainer import Trainer
-import datetime
-import os
+import logging
+import time
+
 import torch
-import torch.distributed as dist
+from lavis.common.dist_utils import (
+    download_cached_file,
+    get_rank,
+    get_world_size,
+    is_main_process,
+    main_process,
+)
+
+from lavis.common.logger import MetricLogger, SmoothedValue
+from lavis.datasets.data_utils import prepare_sample
+import wandb
 
 
-def init_distributed_mode(args):
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        args.rank = int(os.environ["RANK"])
-        args.world_size = int(os.environ["WORLD_SIZE"])
-        args.gpu = int(os.environ["LOCAL_RANK"])
-    elif "SLURM_PROCID" in os.environ:
-        args.rank = int(os.environ["SLURM_PROCID"])
-        args.gpu = args.rank % torch.cuda.device_count()
+def train(self):
+    start_time = time.time()
+    best_agg_metric = 0
+    best_epoch = 0
 
+    self.log_config()
 
-    torch.cuda.set_device(args.gpu)
+    # resume from checkpoint if specified
+    if not self.evaluate_only and self.resume_ckpt_path is not None:
+        self._load_checkpoint(self.resume_ckpt_path)
 
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        world_size=args.world_size,
-        rank=args.rank,
-        timeout=datetime.timedelta(
-            days=365
-        ),  # allow auto-downloading and de-compressing
-    )
-    dist.barrier()
+    for cur_epoch in range(self.start_epoch, self.max_epoch):
+        # training phase
+        if not self.evaluate_only:
+            logging.info("Start training")
+            train_stats = self.train_epoch(cur_epoch)
+            self.log_stats(split_name="train", stats=train_stats)
 
-    import builtins as __builtin__
+        # evaluation phase
+        if len(self.valid_splits) > 0:
+            for split_name in self.valid_splits:
+                logging.info("Evaluating on {}.".format(split_name))
 
-    builtin_print = __builtin__.print
+                val_log = self.eval_epoch(
+                    split_name=split_name, cur_epoch=cur_epoch
+                )
+                if val_log is not None:
+                    if is_main_process():
+                        assert (
+                            "agg_metrics" in val_log
+                        ), "No agg_metrics found in validation log."
 
-    is_master = args.rank == 0
-    def print(*args, **kwargs):
-        force = kwargs.pop("force", False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
+                        agg_metrics = val_log["agg_metrics"]
+                        if agg_metrics > best_agg_metric and split_name == "val":
+                            best_epoch, best_agg_metric = cur_epoch, agg_metrics
 
-    __builtin__.print = print
+                            self._save_checkpoint(cur_epoch, is_best=True)
 
+                        val_log.update({"best_epoch": best_epoch})
+                        self.log_stats(val_log, split_name)
 
-def run_train(args):
-    init_distributed_mode(args)
-    trainer = Trainer(args)
-    trainer.train()
-    dist.destroy_process_group()
+def train_epoch(self,
+        epoch,
+        iters_per_epoch,
+        model,
+        data_loader,
+        optimizer,
+        lr_scheduler,
+        scaler=None,
+        start_iters=None,
+        log_freq=50,
+        cuda_enabled=False,
+        accum_grad_iters=1):
     
+    self.model.train()
+
+
+
+    use_amp = scaler is not None
+
+    if not hasattr(data_loader, "__next__"):
+        # convert to iterator if not already
+        data_loader = iter(data_loader)
+
+    metric_logger = MetricLogger(delimiter="  ")
+    metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
+    metric_logger.add_meter("loss", SmoothedValue(window_size=1, fmt="{value:.4f}"))
+
+    # if iter-based runner, schedule lr based on inner epoch.
+    logging.info(
+        "Start training epoch {}, {} iters per inner epoch.".format(
+            epoch, iters_per_epoch
+        )
+    )
+    header = "Train: data epoch: [{}]".format(epoch)
+    if start_iters is None:
+        # epoch-based runner
+        inner_epoch = epoch
+    else:
+        # In iter-based runner, we schedule the learning rate based on iterations.
+        inner_epoch = start_iters // iters_per_epoch
+        header = header + "; inner epoch [{}]".format(inner_epoch)
+
+    for i in metric_logger.log_every(range(iters_per_epoch), log_freq, header):
+        # if using iter-based runner, we stop after iters_per_epoch iterations.
+        if i >= iters_per_epoch:
+            break
+
+        samples = next(data_loader)
+
+        samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
+        samples.update(
+            {
+                "epoch": inner_epoch,
+                "num_iters_per_epoch": iters_per_epoch,
+                "iters": i,
+            }
+        )
+
+        lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
+
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            loss = self.train_step(model=model, samples=samples)
+
+        # after_train_step()
+        if use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        # update gradients every accum_grad_iters iterations
+        if (i + 1) % accum_grad_iters == 0:
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
+
+        metric_logger.update(loss=loss.item())
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+
+        # log to wandb
+        if is_main_process() and wandb.run is not None:
+            wandb.log(
+                {
+                    "train/lr": optimizer.param_groups[0]["lr"],
+                }
+            )
+
+        # print("breaking in train_inner_loop in moment_retrieval.py")
+        # break
+
+    # after train_epoch()
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    logging.info("Averaged stats: " + str(metric_logger.global_avg()))
+
+    return {
+        k: "{:.3f}".format(meter.global_avg)
+        for k, meter in metric_logger.meters.items()
+}
 
 
 if __name__ == "__main__":
@@ -57,18 +166,14 @@ if __name__ == "__main__":
     parser.add_argument('--model-path', help='', required=True)
     parser.add_argument('--audio-encoder', help='', required=False)
     parser.add_argument('--video-folder', help='Directory containing video files.', required=True)
-    parser.add_argument('--train-annotation-file', help='Path to the ground truth file containing question.', required=True)
-    parser.add_argument('--val-annotation-file', help='Path to the ground truth file containing question.', required=True)
-    parser.add_argument('--output-dir', help='Directory to save the model checkpoints.', required=True)
-    parser.add_argument('--val-freq', help='Validation frequency.', type=int, default=1)
-    parser.add_argument('--save-freq', help='Checkpoint save frequency.', type=int, default=5)
-    parser.add_argument('--max-epoch', help='Number epochs.', type=int, default=50)
+    parser.add_argument('--annotation-file', help='Path to the ground truth file containing question.', required=True)
+    parser.add_argument('--output-file', help='Directory to save the model results JSON.', required=True)
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--device", type=str, required=False, default='cuda:0')
-    parser.add_argument("--batch-size", type=int, required=False, default=2)
+    parser.add_argument("--batch-size", type=int, required=False, default=1)
     parser.add_argument("--num-workers", type=int, required=False, default=8)
     parser.add_argument("--dataset", type=str, required=True)
     args = parser.parse_args()
 
-    run_train(args)
+    run_inference(args)
