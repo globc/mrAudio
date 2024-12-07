@@ -37,25 +37,21 @@ def run_inference(args):
     out_file = open(output_file, "w")
 
     for i, samples in enumerate(tqdm(dataloader)):
-        output = model.generate(samples)
+        outputs = model.generate(samples)
 
-        raw_out = output
-        output = convert_percentages_to_second(output,150)
+        for qid, query, vid, raw_out in zip(samples["qids"], samples["query"], samples["vid"], outputs):
 
-        pred_relevant_windows = moment_str_to_list(post_process(output))
+            pred_relevant_windows = moment_str_to_list(post_process(raw_out))
 
-        # TODO batch_size > 1
-        out = {
-                "raw_out": raw_out,
-                "qid": samples["qids"][0],
-                "query": samples["query"][0],
-                "vid": samples["vid"][0],
+            out = {
+                "qid": qid,
+                "query": query,
+                "vid": vid,
                 "pred_relevant_windows": pred_relevant_windows,
-                "raw_out": raw_out,
-                # "pred_saliency_scores": , # TODO for QVH submission?
+                "raw_out": raw_out
             }
         
-        out_file.write(json.dumps(out) + "\n")
+            out_file.write(json.dumps(out) + "\n")
 
     out_file.close()
 

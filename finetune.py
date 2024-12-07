@@ -24,47 +24,38 @@ from lavis.common.annotator.uniformer.mmcv.runner.checkpoint import save_checkpo
 import torch.utils.data.sampler
 
 
-def train(model,start_epoch:int,max_epoch:int,valid_splits:[],val_freq:int,data_loader:DataLoader,evaluate_only:bool=False):
-    start_time = time.time()
-    best_agg_metric = 0
-    best_epoch = 0
+def eval_epoch(model, dataloader):
+    model = self.unwrap_dist_model(model)
+    model = self._reload_best_model(model)
 
-    """
-    learning_rate = 0.001  # Adjust as needed
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    """
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    model.eval()
 
-    lr_scheduler = LRScheduler(optimizer=optimizer,)
+    results = []
+    for i, samples in enumerate(tqdm(dataloader)):
+        outputs = model.generate(samples)
 
-    # resume from checkpoint if specified
-    ##if not self.evaluate_only and self.resume_ckpt_path is not None:
-    ##    self._load_checkpoint(self.resume_ckpt_path)
+        for qid, query, vid, target, output in zip(samples["qids"], samples["query"], samples["vid"], samples["text_output"], outputs):
+            relevant_windows = moment_str_to_list(post_process(target))
+            pred_relevant_windows = moment_str_to_list(post_process(output))
 
-    for cur_epoch in range(start_epoch, max_epoch):
-        if len(valid_splits) > 0 and (evaluate_only or cur_epoch%val_freq == 0):
-            for split_name in valid_splits:
-                train_epoch(epoch=cur_epoch,model=model,iters_per_epoch=int(len(valid_splits)/val_freq),data_loader=data_loader,lr_scheduler=lr_scheduler,optimizer=optimizer)
+            out = {
+                "qid": qid,
+                "query": query,
+                "vid": vid,
+                "relevant_windows": relevant_windows,
+                "pred_relevant_windows": pred_relevant_windows,
+            }
 
-            
-            # eval_epoch
-            results = eval_submission()
+            results.append(out)
 
-
-            ## if eval good then 
-
-            save_checkpoint(model,f"{cur_epoch}_name",torch.load)
-
-
-            ## if veal bad load previos
-
-            load_checkpoint(model,f"{cur_epoch-1}_name",torch.load)
+    all_metrics = eval_submission(results, results)
+    return all_metrics
 
 def train_epoch(
         epoch,
         iters_per_epoch,
         model,
-        data_loader,
+        dataloader,
         lr_scheduler,
         optimizer,
         scaler=None,
@@ -72,7 +63,7 @@ def train_epoch(
         log_freq=50,
         cuda_enabled=False,
         accum_grad_iters=1):
-    
+
     model.train()  ## missing
 
 
@@ -97,7 +88,7 @@ def train_epoch(
         if i >= iters_per_epoch:
             break
 
-        samples = next(data_loader)
+        samples = next(dataloader)
 
         samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
         samples.update(
@@ -110,7 +101,7 @@ def train_epoch(
 
         lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
 
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.cuda.amp.autocast():
             loss = model.forward(samples)
 
         scaler.scale(loss).backward()
@@ -141,28 +132,51 @@ def train_epoch(
     }
 
 def run_train(args):
-
-    model:Module
     if args.model == "X-InstructBLIP":
         from models.xinstructblip import XInstructBLIP
+        from lavis.processors.audio_processors import BeatsAudioProcessor
+        from lavis.processors.alpro_processors import AlproVideoEvalProcessor
         model = XInstructBLIP(args.model_path, args.audio_encoder)
+        video_processor = AlproVideoEvalProcessor(n_frms=4, image_size=224)
+        audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=4, is_eval=False, frame_length=512)
+        
 
-    if args.model == "VideoLLaMA":
+    elif args.model == "VideoLLaMA":
         from models.videollama import VideoLLaMA
         model = VideoLLaMA(args.model_path)
+        video_processor = model.processor
+        audio_processor = None
+        
 
-    dataset:MRDataset
     if args.dataset in ["QVH", "Charades_STA"]:
-        dataset = MRDataset(vis_root=args.video_folder, ann_path=args.annotation_file)
-
-    dataloader = DataLoader(dataset=dataset,
-                            shuffle=False,
-                            batch_size=args.batch_size,
-                            num_workers=args.num_workers,
-                            collate_fn=collate_fn)
+        train_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.train_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
+        val_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.val_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
 
 
-    train(model,0,4,0,1,dataloader)
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, num_replicas=get_world_size(), rank=get_rank())
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers, collate_fn=collate_fn)
+
+    val_sampler = DistributedSampler(val_dataset, shuffle=False, num_replicas=get_world_size(), rank=get_rank())
+    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, sampler=val_sampler, num_workers=args.num_workers, collate_fn=collate_fn)
+
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    lr_scheduler = LRScheduler(optimizer=optimizer,)
+    scaler = torch.cuda.amp.GradScaler()
+
+    best_agg_metric = 0
+    best_epoch = 0
+    for cur_epoch in range(args.num_epochs):
+        #training phase
+        train_epoch(model=model, dataloader=train_dataloader, lr_scheduler=lr_scheduler, optimizer=optimizer, scaler=scaler)
+        # validation phase, every val_freq epoch
+        if cur_epoch%args.val_freq == 0:
+            results = eval_epoch(model, val_dataloader)
+            if is_main_process():
+                agg_metrics = results["brief"]["MR-full-R1-avg"]
+                if agg_metrics > best_agg_metric:
+                    self._save_checkpoint(cur_epoch, is_best=True)
+
+    dist.barrier()
 
 
 if __name__ == "__main__":
@@ -172,8 +186,11 @@ if __name__ == "__main__":
     parser.add_argument('--model-path', help='', required=True)
     parser.add_argument('--audio-encoder', help='', required=False)
     parser.add_argument('--video-folder', help='Directory containing video files.', required=True)
-    parser.add_argument('--annotation-file', help='Path to the ground truth file containing question.', required=True)
+    parser.add_argument('--train-annotation-file', help='Path to the ground truth file containing question.', required=True)
+    parser.add_argument('--val-annotation-file', help='Path to the ground truth file containing question.', required=True)
     parser.add_argument('--output-file', help='Directory to save the model results JSON.', required=True)
+    parser.add_argument('--val-freq', help='Validation frequency.', type=int, default=1)
+    parser.add_argument('--num-epochs', help='Number epochs.', type=int, default=1)
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--device", type=str, required=False, default='cuda:0')
