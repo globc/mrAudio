@@ -14,10 +14,10 @@ def run_inference(args):
     if args.model == "X-InstructBLIP":
         from models.xinstructblip import XInstructBLIP
         from lavis.processors.audio_processors import BeatsAudioProcessor
-        from lavis.processors.alpro_processors import AlproVideoEvalProcessor
+        from processors.alpro_processors import AlproVideoEvalProcessor_Stamps
         model = XInstructBLIP(args.model_path, args.audio_encoder)
-        video_processor = AlproVideoEvalProcessor(n_frms=4, image_size=224)
-        audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=4, is_eval=False, frame_length=512)
+        video_processor = AlproVideoEvalProcessor_Stamps(n_frms=60, image_size=224)
+        audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=60, is_eval=True, frame_length=512)
         
 
     if args.model == "VideoLLaMA":

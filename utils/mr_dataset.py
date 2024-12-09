@@ -38,9 +38,14 @@ class MRDataset(Dataset):
             if self.audio_processor is not None:
                 audio = self.audio_processor(video_path).unsqueeze(0).to("cuda")
 
-            video = self.video_processor(video_path).unsqueeze(0).to("cuda")
+            video, indices, fps = self.video_processor(video_path)
+            video = video.unsqueeze(0).to("cuda")
+
+            timestamps = [round(idx / fps) for idx in indices]
+
 
         if self.model == "VideoLLaMA":
+            # TODO timestamps
             try:
                 video = self.video_processor(video_path, va=True)
             except:
@@ -89,11 +94,17 @@ class MRDataset(Dataset):
 
         text_input = prompt 
 
+        query_prompt = "Query: " + query + "\n"
+        task_prompt = "Given the video and the query, find the relevant windows.\nRelevant windows: "
+        text_input = query_prompt + task_prompt
+
         return {
             "text_input": text_input,
             "text_output": str(ann["relevant_windows"]),
             "video": video,
             "audio": audio,
+            "timestamps": timestamps,
+            "duration": ann["duration"],
             # qid, query & vid necessary for QVH submission
             "qid": ann["qid"],
             "query": query,

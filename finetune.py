@@ -63,7 +63,6 @@ if __name__ == "__main__":
     parser.add_argument('--val-freq', help='Validation frequency.', type=int, default=1)
     parser.add_argument('--save-freq', help='Checkpoint save frequency.', type=int, default=1)
     parser.add_argument('--max-epoch', help='Number epochs.', type=int, default=50)
-    parser.add_argument('--lr', help='Learning rate.', type=float, default=1e-3)
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--device", type=str, required=False, default='cuda:0')

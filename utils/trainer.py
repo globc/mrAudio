@@ -32,29 +32,31 @@ class Trainer:
         if args.model == "X-InstructBLIP":
             from models.xinstructblip import XInstructBLIP
             from lavis.processors.audio_processors import BeatsAudioProcessor
-            from lavis.processors.alpro_processors import AlproVideoEvalProcessor
+            from processors.alpro_processors import AlproVideoEvalProcessor_Stamps, AlproVideoTrainProcessor_Stamps
             self.model = XInstructBLIP(args.model_path, args.audio_encoder)
-            video_processor = AlproVideoEvalProcessor(n_frms=60, image_size=224)
+            train_video_processor = AlproVideoTrainProcessor_Stamps(n_frms=60, image_size=224)
+            val_video_processor = AlproVideoEvalProcessor_Stamps(n_frms=60, image_size=224)
             audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=60, is_eval=False, frame_length=512)
         
 
         elif args.model == "VideoLLaMA":
             from models.videollama import VideoLLaMA
             self.model = VideoLLaMA(args.model_path)
-            video_processor = self.model.processor
+            train_video_processor = self.model.processor
+            val_video_processor = self.model.processor
             audio_processor = None
             
         self.model = self.model.to(args.gpu)
 
-        self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=3e-4)
         self.lr_scheduler = LinearWarmupCosineLRScheduler(self.optimizer, self.max_epoch, min_lr=0, init_lr=3e-4, warmup_steps=2255, warmup_start_lr=1e-8)
         self.scaler = torch.cuda.amp.GradScaler()
 
         self.model = DDP(self.model, device_ids=[args.gpu])
 
         assert args.dataset in ["QVH", "Charades_STA"]
-        train_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.train_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
-        val_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.val_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
+        train_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.train_annotation_file, video_processor=train_video_processor, audio_processor=audio_processor, model=args.model)
+        val_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.val_annotation_file, video_processor=val_video_processor, audio_processor=audio_processor, model=args.model)
 
         train_sampler = DistributedSampler(train_dataset, shuffle=True, num_replicas=dist.get_world_size(), rank=dist.get_rank())
         val_sampler = DistributedSampler(val_dataset, shuffle=False, num_replicas=dist.get_world_size(), rank=dist.get_rank())
