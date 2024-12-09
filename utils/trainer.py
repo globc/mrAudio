@@ -1,6 +1,7 @@
 import logging
 import torch
 import os
+import tqdm
 
 from utils.mr_dataset import MRDataset, collate_fn
 from lavis.common.utils import is_url
@@ -12,6 +13,8 @@ import torch.optim as optim
 from lavis.common.optims import LinearWarmupCosineLRScheduler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from lavis.common.logger import MetricLogger, SmoothedValue
+
 
 
 
@@ -25,6 +28,7 @@ class Trainer:
         self.max_epoch = args.max_epoch
         self.output_dir = args.output_dir
         self.resume_ckpt_path = None # Change if resume
+        self.device = torch.device("cuda")
         self.accum_grad_iters = 2
         self.start_epoch = 0
 

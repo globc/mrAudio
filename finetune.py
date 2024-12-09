@@ -61,7 +61,7 @@ if __name__ == "__main__":
     parser.add_argument('--val-annotation-file', help='Path to the ground truth file containing question.', required=True)
     parser.add_argument('--output-dir', help='Directory to save the model checkpoints.', required=True)
     parser.add_argument('--val-freq', help='Validation frequency.', type=int, default=1)
-    parser.add_argument('--save-freq', help='Checkpoint save frequency.', type=int, default=1)
+    parser.add_argument('--save-freq', help='Checkpoint save frequency.', type=int, default=5)
     parser.add_argument('--max-epoch', help='Number epochs.', type=int, default=50)
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)

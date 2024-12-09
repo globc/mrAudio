@@ -6,4 +6,4 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run --nproc_per_node=4 
             --video-folder $HPC_SCRATCH/mrAudio/data/qvh/videos \
             --train-annotation-file $HPC_SCRATCH/mrAudio/data/qvh/highlight_train_release.jsonl \
             --val-annotation-file $HPC_SCRATCH/mrAudio/data/qvh/highlight_val_release.jsonl \
-            --output-file ${OUTPUT_FILE} \
+            --output-dir $HPC_SCRATCH/mrAudio/checkpoints/qvh/X-InstructBLIP/ \
