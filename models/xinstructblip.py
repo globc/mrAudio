@@ -42,23 +42,23 @@ def concat_text_input_output(input_ids, input_atts, output_ids, output_atts):
     return llm_tokens, input_part_targets_len
 
 
-def maybe_autocast(self, dtype=torch.float16):
-    # if on cpu, don't use autocast
-    # if on gpu, use autocast with dtype if provided, otherwise use torch.float16
-    enable_autocast = self.device != torch.device("cpu")
-
-    if enable_autocast:
-        return torch.cuda.amp.autocast(dtype=dtype)
-    else:
-        return contextlib.nullcontext()
-
-
 class XInstructBLIP(nn.Module):
     
     @property
     def device(self):
         return list(self.parameters())[0].device
     
+
+    def maybe_autocast(self, dtype=torch.float16):
+        # if on cpu, don't use autocast
+        # if on gpu, use autocast with dtype if provided, otherwise use torch.float16
+        enable_autocast = self.device != torch.device("cpu")
+
+        if enable_autocast:
+            return torch.cuda.amp.autocast(dtype=dtype)
+        else:
+            return contextlib.nullcontext()
+
     def __init__(self, model_path, audio_path):
         super().__init__()
         self.enumerate_inputs = False
@@ -186,6 +186,15 @@ class XInstructBLIP(nn.Module):
             )
             setattr(self, f"{modality}_llm_proj", proj)
         
+        # Freeze QFormers
+        for modality in self.modalities:
+            for name, param in getattr(self, f"{modality}_ln").named_parameters():
+                param.requires_grad = False
+            getattr(self, f"{modality}_query_tokens").requires_grad = False
+            for name, param in getattr(self, f'{modality}_Qformer').named_parameters():
+                param.requires_grad = False
+            for name, param in getattr(self, f'{modality}_llm_proj').named_parameters():
+                param.requires_grad = False
 
         self.MODALITY_TO_CUE = {
             "video": " video: ",
@@ -202,11 +211,152 @@ class XInstructBLIP(nn.Module):
 
         
 
-
+    @torch.no_grad()
     def generate(self, samples):
-        # TODO
+        self.llm_tokenizer.padding_side = "left"
+        curr_modalities = self.modalities
+        bs = samples["video"].size(0) if isinstance(samples["video"], torch.Tensor) else len(samples["video"])
+        prompt = samples["text_input"]
 
-        return samples
+        query_tokens = {}
+        for modality in curr_modalities:
+            query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(bs, -1, -1)
+        
+
+        text_Qformer = self.tokenizer(
+            prompt,
+            padding='longest',
+            truncation=True,
+            max_length=self.max_txt_len,
+            return_tensors="pt",
+        ).to(self.device)
+
+
+
+        Qformer_atts = {}
+        query_atts = {}
+        
+        for modality in curr_modalities:
+            # B, Token Size
+            query_atts[modality] = torch.ones(query_tokens[modality].size()[:-1], dtype=torch.long).to(self.device)
+            # B, Token Size + Inp Size
+            Qformer_atts[modality] = torch.cat([query_atts[modality],text_Qformer.attention_mask],dim=1)
+
+
+        embeds = {}
+        data_atts = {}
+        for modality in curr_modalities:
+            data = samples[modality]
+            ln = getattr(self, f"{modality}_ln")
+            encoder = getattr(self, f"{modality}_encoder")
+            if modality == "video":
+                embeds[modality] = []
+                data_atts[modality] = []
+                for j in range(data.size(2)):
+                    this_frame = data[:,:,j,:,:]
+                    with self.maybe_autocast():
+                        embeds[modality].append(ln(encoder(this_frame)))
+                        data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
+            
+            elif modality == 'audio':
+                embeds[modality] = []
+                data_atts[modality] = []
+                for j in range(data.size(1)):
+                    this_frame = data[:,j,:,:]
+                    with self.maybe_autocast():
+                        embeds[modality].append(ln(encoder(this_frame)))
+                    data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
+
+
+        query_outputs = {}
+        num = {}
+        for modality in curr_modalities:
+            num[modality] = len(embeds[modality])
+            bs = embeds[modality][0].shape[0]
+            indices = [j_+r for r,j in enumerate([[i*bs for i in range(num[modality])]]*bs) for j_ in j]
+            reordered_embeds = torch.cat(embeds[modality])[indices]
+            reordered_atts = torch.cat(data_atts[modality])[indices]
+            query_output = getattr(self, f"{modality}_Qformer").bert(
+                text_Qformer.input_ids.repeat(num[modality], 1),
+                attention_mask=Qformer_atts[modality].repeat(num[modality], 1),
+                query_embeds=query_tokens[modality].repeat(num[modality], 1, 1),
+                encoder_hidden_states=reordered_embeds,
+                encoder_attention_mask=reordered_atts,
+                return_dict=True,
+            )
+            query_outputs[modality] = query_output
+           
+
+
+        inputs_llm = {}
+        atts_llm = {}
+        enumeration = {}
+
+        for i,modality in enumerate(curr_modalities):
+            # num*bs, num query tokens, llm emb size
+            inputs_llm[modality] = getattr(self, f"{modality}_llm_proj")(query_outputs[modality].last_hidden_state[:,:query_tokens[modality].size(1),:]) 
+            # bs, num, num query tokens, llm emb size -> bs, num*num query tokens, llm emb size
+            inputs_llm[modality] = inputs_llm[modality].reshape(bs, num[modality], self.num_query_token, -1).view(bs,  num[modality]*self.num_query_token, -1)
+            atts_llm[modality] =  torch.ones(inputs_llm[modality].size()[:-1], dtype=torch.long).to(self.device)
+            
+            # TODO maybe remove
+            if self.enumerate_inputs:
+                enumeration[modality] = self.llm_tokenizer(
+                [f"{'' if i == 0 else ' '}({chr(97+i)}) " for _ in prompt],
+                return_tensors="pt",
+                add_special_tokens=False if (i!= 0 or self.prefix) else True
+                ).to(self.device)
+
+        ## remove trailing whitespace 
+        prompt = [p.strip() for p in prompt]
+
+        llm_tokens = self.llm_tokenizer(
+            prompt,
+            padding="longest",
+            return_tensors="pt",
+            add_special_tokens=False
+        ).to(self.device)
+        bs = llm_tokens.input_ids.shape[0]
+
+
+        att_list = []
+        inp_list = []        
+
+        # Joint video audio
+        for pos in range(num['video']):
+            if self.enumerate_inputs:
+                enumeration_pos = self.llm_tokenizer(
+                    [f"{'' if pos == 0 else ' '}({chr(97+pos)}) " for _ in prompt],
+                    return_tensors="pt",
+                    add_special_tokens=False if (pos!= 0) else True
+                ).to(self.device)
+                enumeration_inputs_llm = self.llm_model.get_input_embeddings()(enumeration_pos.input_ids)
+                enumeration_atts_llm = enumeration_pos.attention_mask.to(self.device)
+                inp_list.extend([enumeration_inputs_llm])
+                att_list.extend([enumeration_atts_llm])
+            
+            # Cues
+            for modality in ['video', 'audio']:
+                att_list.extend([torch.tensor(self.tokenized_cue[modality].attention_mask).to(self.device).repeat(atts_llm[modality].shape[0], 1), atts_llm[modality].view(bs,  num[modality], self.num_query_token)[:, pos, :]])
+                inp_list.extend([self.emb_cue[modality].to(self.device).repeat(inputs_llm[modality].shape[0], 1, 1), inputs_llm[modality].view(bs,  num[modality], self.num_query_token, -1)[:, pos, :, :]])
+
+
+        att_list.append(llm_tokens.attention_mask)
+        inputs_embeds = self.llm_model.get_input_embeddings()(llm_tokens.input_ids)
+        inp_list.append(inputs_embeds)
+       
+        attention_mask = torch.cat(att_list, dim=1)
+        inputs_embeds = torch.cat(inp_list, dim=1)
+
+        with self.maybe_autocast():
+            outputs = self.llm_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+            )
+        outputs[outputs == 0] = 2 # convert output id 0 to 2 (eos_token_id)
+        output_text = self.llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        output_text = [o.strip() for o in output_text]
+        return output_text
     
     def forward(self, samples):
         
@@ -216,20 +366,6 @@ class XInstructBLIP(nn.Module):
         random.shuffle(self.modalities)
 
         curr_modalities = [modality for modality in self.modalities if modality in samples]
-
-        # Freeze QFormers (this way higher compatibility)
-        dummy_loss = 0.
-        for modality in self.modalities:
-            for name, param in getattr(self,f"{modality}_ln").named_parameters():
-                # param.requires_grad = False
-                dummy_loss += param.sum()*0.
-            dummy_loss += getattr(self, f"{modality}_query_tokens").sum()*0.
-            for name, param in getattr(self, f'{modality}_Qformer').named_parameters():
-                    # param.requires_grad = False
-                    dummy_loss += param.sum()*0.
-            for name, param in getattr(self, f'{modality}_llm_proj').named_parameters():
-                    # param.requires_grad = False
-                    dummy_loss += param.sum()*0.
         
         
         embeds = {}
@@ -244,7 +380,7 @@ class XInstructBLIP(nn.Module):
                 data_atts[modality] = []
                 for j in range(data.size(2)):
                     this_frame = data[:,:,j,:,:]
-                    with maybe_autocast(self):
+                    with self.maybe_autocast():
                         embeds[modality].append(ln(encoder(this_frame)))
                         data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
                 # B, Token Size, LM EMB
@@ -255,7 +391,7 @@ class XInstructBLIP(nn.Module):
                 data_atts[modality] = []
                 for j in range(data.size(1)):
                     this_frame = data[:,j,:,:]
-                    with maybe_autocast(self):
+                    with self.maybe_autocast():
                         embeds[modality].append(ln(encoder(this_frame)))
                     data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
                 # B, Token Size, LM EMB
@@ -357,7 +493,7 @@ class XInstructBLIP(nn.Module):
                     [f"{'' if pos == 0 else ' '}({chr(97+pos)}) " for _ in prompt],
                     return_tensors="pt",
                     add_special_tokens=False if (pos!= 0) else True
-                    ).to(self.device)
+                ).to(self.device)
                 enumeration_inputs_llm = self.llm_model.get_input_embeddings()(enumeration_pos.input_ids)
                 enumeration_atts_llm = enumeration_pos.attention_mask.to(self.device)
                 inp_list.extend([enumeration_inputs_llm])
@@ -387,7 +523,7 @@ class XInstructBLIP(nn.Module):
 
        
         
-        with maybe_autocast(self):
+        with self.maybe_autocast():
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -395,11 +531,7 @@ class XInstructBLIP(nn.Module):
                 labels=targets,
             )
 
-        loss = dummy_loss+outputs.loss
-
-
-
-        return {"loss": loss}
+        return {"loss": outputs.loss}
 
     @classmethod
     def init_tokenizer(cls, truncation_side="right"):

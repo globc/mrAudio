@@ -1,0 +1,224 @@
+import logging
+import torch
+import os
+
+from utils.mr_dataset import MRDataset, collate_fn
+from utils.utils import prepare_sample, post_process, moment_str_to_list
+from eval.mr_eval import eval_submission
+from torch.utils.data import  DataLoader, DistributedSampler
+import torch.optim as optim
+from utils.utils import prepare_sample
+from torch.optim.lr_scheduler import LRScheduler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+
+class Trainer:
+    def __init__(
+            self,
+            args,
+            ):
+        self.val_freq = args.val_freq
+        self.save_freq = args.save_freq
+        self.num_epochs = args.num_epochs
+        self.output_dir = args.output_dir
+        self.cur_epoch = 0
+
+        # get model
+        if args.model == "X-InstructBLIP":
+            from models.xinstructblip import XInstructBLIP
+            from lavis.processors.audio_processors import BeatsAudioProcessor
+            from lavis.processors.alpro_processors import AlproVideoEvalProcessor
+            self.model = XInstructBLIP(args.model_path, args.audio_encoder)
+            video_processor = AlproVideoEvalProcessor(n_frms=60, image_size=224)
+            audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=60, is_eval=False, frame_length=512)
+        
+
+        elif args.model == "VideoLLaMA":
+            from models.videollama import VideoLLaMA
+            self.model = VideoLLaMA(args.model_path)
+            video_processor = self.model.processor
+            audio_processor = None
+            
+        self.model = self.model.to()
+        self.model = DDP(self.model, device_ids=[os.environ["LOCAL_RANK"]])
+
+        assert args.dataset in ["QVH", "Charades_STA"]
+        train_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.train_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
+        val_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.val_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
+
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+
+        self.train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers, collate_fn=collate_fn)
+        self.val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, sampler=val_sampler, num_workers=args.num_workers, collate_fn=collate_fn)
+
+        self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr)
+        self.lr_scheduler = LRScheduler(optimizer=self.optimizer)
+        self.scaler = torch.cuda.amp.GradScaler()
+
+    def train(self):
+        best_agg_metric = 0
+        best_epoch = 0
+        for cur_epoch in range(self.num_epochs):
+            #training phase
+            self.train_epoch()
+            # validation phase, every val_freq epoch
+            if cur_epoch%self.val_freq == 0:
+                results = self.eval_epoch()
+                if dist.get_rank() == 0: # only need to save once
+                    agg_metrics = results["brief"]["MR-full-R1-avg"]
+                    if agg_metrics > best_agg_metric:
+                        self._save_checkpoint(cur_epoch, is_best=True)
+
+            # save checkpoint according to save freq
+            if self.save_freq>0 and cur_epoch%self.save_freq == 0:
+                self._save_checkpoint(cur_epoch, is_best=False)
+
+
+        dist.barrier()
+
+    def train_epoch(self):
+
+        self.model.train()  ## missing
+
+
+        metric_logger = MetricLogger(delimiter="  ")
+        metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
+        metric_logger.add_meter("loss", SmoothedValue(window_size=1, fmt="{value:.4f}"))
+
+        logging.info(
+            "Start training epoch {}, {} iters per inner epoch.".format(
+                epoch, iters_per_epoch
+            )
+        )
+
+        header = "Train: data epoch: [{}]".format(epoch)
+
+        inner_epoch = start_iters // iters_per_epoch
+        header = header + "; inner epoch [{}]".format(inner_epoch)
+
+
+        for i in metric_logger.log_every(range(iters_per_epoch), log_freq, header):
+            # if using iter-based runner, we stop after iters_per_epoch iterations.
+            if i >= iters_per_epoch:
+                break
+
+            samples = next(dataloader)
+
+            samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
+            samples.update(
+                {
+                    "epoch": inner_epoch,
+                    "num_iters_per_epoch": iters_per_epoch,
+                    "iters": i,
+                }
+            )
+
+            lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
+
+            with torch.cuda.amp.autocast():
+                loss = model.forward(samples)
+
+            scaler.scale(loss).backward()
+            
+
+            # update gradients every accum_grad_iters iterations
+            if (i + 1) % accum_grad_iters == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+
+            metric_logger.update(loss=loss.item())
+            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+
+            # log to wandb
+            if dist.get_rank() == 0 and wandb.run is not None:
+                wandb.log(
+                    {
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                    }
+                )
+        metric_logger.synchronize_between_processes()
+        logging.info("Averaged stats: " + str(metric_logger.global_avg()))
+
+        return {
+            k: "{:.3f}".format(meter.global_avg)
+            for k, meter in metric_logger.meters.items()
+        }
+
+    @torch.no_grad()
+    def eval_epoch(self):
+        model = self.model.module # unwrap from DDP
+        model = self._reload_best_model(model)
+
+        model.eval()
+
+        results = []
+        for i, samples in enumerate(tqdm(self.val_dataloader)):
+            outputs = model.generate(samples)
+
+            for qid, query, vid, target, output in zip(samples["qids"], samples["query"], samples["vid"], samples["text_output"], outputs):
+                relevant_windows = moment_str_to_list(post_process(target))
+                pred_relevant_windows = moment_str_to_list(post_process(output))
+
+                out = {
+                    "qid": qid,
+                    "query": query,
+                    "vid": vid,
+                    "relevant_windows": relevant_windows,
+                    "pred_relevant_windows": pred_relevant_windows,
+                }
+
+                results.append(out)
+
+        all_metrics = eval_submission(results, results)
+        return all_metrics
+    
+    def _save_checkpoint(self, cur_epoch, is_best=False):
+        """
+        Save the checkpoint at the current epoch.
+        """
+        model = self.model.module # unwrap from DDP to access parameters
+        param_grad_dic = {
+            k: v.requires_grad for (k, v) in model.named_parameters()
+        }
+        state_dict = model.state_dict()
+        for k in list(state_dict.keys()):
+            if k in param_grad_dic.keys() and not param_grad_dic[k]:
+                # delete parameters that do not require gradient
+                del state_dict[k]
+
+        save_obj = {
+            "model": state_dict,
+            "optimizer": self.optimizer.state_dict(),
+            "scaler": self.scaler.state_dict() if self.scaler else None,
+            "epoch": cur_epoch,
+        }
+        save_to = os.path.join(
+            self.output_dir,
+            "checkpoint_{}.pth".format("best" if is_best else cur_epoch),
+        )
+        logging.info("Saving checkpoint at epoch {} to {}.".format(cur_epoch, save_to))
+        torch.save(save_obj, save_to)
+
+    def _reload_best_model(self, model):
+        """
+        Load the best checkpoint for evaluation.
+        """
+        checkpoint_path = os.path.join(self.output_dir, "checkpoint_best.pth")
+
+        logging.info("Loading checkpoint from {}.".format(checkpoint_path))
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        try:
+            model.load_state_dict(checkpoint["model"])
+        except RuntimeError as e:
+            logging.warning(
+                """
+                Key mismatch when loading checkpoint. This is expected if only part of the model is saved.
+                Trying to load the model with strict=False.
+                """
+            )
+            model.load_state_dict(checkpoint["model"], strict=False)
+        return model
