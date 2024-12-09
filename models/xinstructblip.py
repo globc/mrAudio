@@ -321,6 +321,7 @@ class XInstructBLIP(nn.Module):
         inp_list = []        
 
         # Joint video audio
+        print(num["video"])
         for pos in range(num['video']):
             if self.enumerate_inputs:
                 enumeration_pos = self.llm_tokenizer(
@@ -338,6 +339,28 @@ class XInstructBLIP(nn.Module):
                 att_list.extend([torch.tensor(self.tokenized_cue[modality].attention_mask).to(self.device).repeat(atts_llm[modality].shape[0], 1), atts_llm[modality].view(bs,  num[modality], self.num_query_token)[:, pos, :]])
                 inp_list.extend([self.emb_cue[modality].to(self.device).repeat(inputs_llm[modality].shape[0], 1, 1), inputs_llm[modality].view(bs,  num[modality], self.num_query_token, -1)[:, pos, :, :]])
 
+            if self.interleave_seconds:
+                assert len(samples["timestamps"][0]) == num["video"]
+                timestamp_tokens = self.llm_tokenizer(
+                    [f" {timestamps[pos]} " for timestamps in samples["timestamps"]],
+                    return_tensors="pt",
+                    add_special_tokens=False
+                ).to(self.device)
+                timestamp_inputs_llm = self.llm_model.get_input_embeddings()(timestamp_tokens.input_ids)
+                timestamp_atts_llm = timestamp_tokens.attention_mask.to(self.device)
+                inp_list.extend([timestamp_inputs_llm])
+                att_list.extend([timestamp_atts_llm])
+
+        # Duration
+        duration_tokens = self.llm_tokenizer(
+            samples["duration"],
+            return_tensors="pt",
+            add_special_tokens=False
+        ).to(self.device)
+        att_list.append(duration_tokens.attention_mask)
+        duration_inputs_llm = self.llm_model.get_input_embeddings()(duration_tokens.input_ids)
+        inp_list.append(duration_inputs_llm)
+                
 
         att_list.append(llm_tokens.attention_mask)
         inputs_embeds = self.llm_model.get_input_embeddings()(llm_tokens.input_ids)
@@ -502,7 +525,27 @@ class XInstructBLIP(nn.Module):
                 att_list.extend([torch.tensor(self.tokenized_cue[modality].attention_mask).to(self.device).repeat(atts_llm[modality].shape[0], 1), atts_llm[modality].view(bs,  num[modality], self.num_query_token)[:, pos, :]])
                 inp_list.extend([self.emb_cue[modality].to(self.device).repeat(inputs_llm[modality].shape[0], 1, 1), inputs_llm[modality].view(bs,  num[modality], self.num_query_token, -1)[:, pos, :, :]])
              
-             
+            if self.interleave_seconds:
+                assert len(samples["timestamps"][0]) == num["video"]
+                timestamp_tokens = self.llm_tokenizer(
+                    [f" {timestamps[pos]} " for timestamps in samples["timestamps"]],
+                    return_tensors="pt",
+                    add_special_tokens=False
+                ).to(self.device)
+                timestamp_inputs_llm = self.llm_model.get_input_embeddings()(timestamp_tokens.input_ids)
+                timestamp_atts_llm = timestamp_tokens.attention_mask.to(self.device)
+                inp_list.extend([timestamp_inputs_llm])
+                att_list.extend([timestamp_atts_llm])
+
+        # Duration
+        duration_tokens = self.llm_tokenizer(
+            samples["duration"],
+            return_tensors="pt",
+            add_special_tokens=False
+        ).to(self.device)
+        att_list.append(duration_tokens.attention_mask)
+        duration_inputs_llm = self.llm_model.get_input_embeddings()(duration_tokens.input_ids)
+        inp_list.append(duration_inputs_llm)
              
         
         
