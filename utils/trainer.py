@@ -3,12 +3,13 @@ import torch
 import os
 
 from utils.mr_dataset import MRDataset, collate_fn
+from lavis.common.utils import is_url
+from lavis.common.dist_utils import download_cached_file
 from utils.utils import prepare_sample, post_process, moment_str_to_list
 from eval.mr_eval import eval_submission
 from torch.utils.data import  DataLoader, DistributedSampler
 import torch.optim as optim
-from utils.utils import prepare_sample
-from torch.optim.lr_scheduler import LRScheduler
+from lavis.common.optims import LinearWarmupCosineLRScheduler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -21,9 +22,11 @@ class Trainer:
             ):
         self.val_freq = args.val_freq
         self.save_freq = args.save_freq
-        self.num_epochs = args.num_epochs
+        self.max_epoch = args.max_epoch
         self.output_dir = args.output_dir
-        self.cur_epoch = 0
+        self.resume_ckpt_path = None # Change if resume
+        self.accum_grad_iters = 2
+        self.start_epoch = 0
 
         # get model
         if args.model == "X-InstructBLIP":
@@ -41,29 +44,35 @@ class Trainer:
             video_processor = self.model.processor
             audio_processor = None
             
-        self.model = self.model.to()
-        self.model = DDP(self.model, device_ids=[os.environ["LOCAL_RANK"]])
+        self.model = self.model.to(args.gpu)
+
+        self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr)
+        self.lr_scheduler = LinearWarmupCosineLRScheduler(self.optimizer, self.max_epoch, min_lr=0, init_lr=3e-4, warmup_steps=2255, warmup_start_lr=1e-8)
+        self.scaler = torch.cuda.amp.GradScaler()
+
+        self.model = DDP(self.model, device_ids=[args.gpu])
 
         assert args.dataset in ["QVH", "Charades_STA"]
         train_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.train_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
         val_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.val_annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
 
-        train_sampler = DistributedSampler(train_dataset, shuffle=True)
-        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+        train_sampler = DistributedSampler(train_dataset, shuffle=True, num_replicas=dist.get_world_size(), rank=dist.get_rank())
+        val_sampler = DistributedSampler(val_dataset, shuffle=False, num_replicas=dist.get_world_size(), rank=dist.get_rank())
 
         self.train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers, collate_fn=collate_fn)
         self.val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, sampler=val_sampler, num_workers=args.num_workers, collate_fn=collate_fn)
 
-        self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr)
-        self.lr_scheduler = LRScheduler(optimizer=self.optimizer)
-        self.scaler = torch.cuda.amp.GradScaler()
-
     def train(self):
         best_agg_metric = 0
         best_epoch = 0
-        for cur_epoch in range(self.num_epochs):
+
+        # resume from checkpoint if specified
+        if self.resume_ckpt_path is not None:
+            self._load_checkpoint(self.resume_ckpt_path)
+
+        for cur_epoch in range(self.start_epoch, self.max_epoch):
             #training phase
-            self.train_epoch()
+            self.train_epoch(cur_epoch)
             # validation phase, every val_freq epoch
             if cur_epoch%self.val_freq == 0:
                 results = self.eval_epoch()
@@ -79,7 +88,7 @@ class Trainer:
 
         dist.barrier()
 
-    def train_epoch(self):
+    def train_epoch(self, cur_epoch):
 
         self.model.train()  ## missing
 
@@ -90,56 +99,32 @@ class Trainer:
 
         logging.info(
             "Start training epoch {}, {} iters per inner epoch.".format(
-                epoch, iters_per_epoch
+                cur_epoch, len(self.train_dataloader)
             )
         )
 
-        header = "Train: data epoch: [{}]".format(epoch)
 
-        inner_epoch = start_iters // iters_per_epoch
-        header = header + "; inner epoch [{}]".format(inner_epoch)
+        for i, samples in enumerate(tqdm(self.train_dataloader)):
+            samples = prepare_sample(samples, cuda_enabled=True)
 
-
-        for i in metric_logger.log_every(range(iters_per_epoch), log_freq, header):
-            # if using iter-based runner, we stop after iters_per_epoch iterations.
-            if i >= iters_per_epoch:
-                break
-
-            samples = next(dataloader)
-
-            samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
-            samples.update(
-                {
-                    "epoch": inner_epoch,
-                    "num_iters_per_epoch": iters_per_epoch,
-                    "iters": i,
-                }
-            )
-
-            lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
+            self.lr_scheduler.step(cur_epoch=cur_epoch, cur_step=i)
 
             with torch.cuda.amp.autocast():
-                loss = model.forward(samples)
+                loss = self.model.forward(samples)
 
-            scaler.scale(loss).backward()
+            self.scaler.scale(loss).backward()
             
 
             # update gradients every accum_grad_iters iterations
-            if (i + 1) % accum_grad_iters == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            if (i + 1) % self.accum_grad_iters == 0:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
 
             metric_logger.update(loss=loss.item())
-            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+            metric_logger.update(lr=self.optimizer.param_groups[0]["lr"])
 
-            # log to wandb
-            if dist.get_rank() == 0 and wandb.run is not None:
-                wandb.log(
-                    {
-                        "train/lr": optimizer.param_groups[0]["lr"],
-                    }
-                )
+
         metric_logger.synchronize_between_processes()
         logging.info("Averaged stats: " + str(metric_logger.global_avg()))
 
@@ -157,6 +142,7 @@ class Trainer:
 
         results = []
         for i, samples in enumerate(tqdm(self.val_dataloader)):
+            samples = prepare_sample(samples, cuda_enabled=True)
             outputs = model.generate(samples)
 
             for qid, query, vid, target, output in zip(samples["qids"], samples["query"], samples["vid"], samples["text_output"], outputs):
@@ -222,3 +208,27 @@ class Trainer:
             )
             model.load_state_dict(checkpoint["model"], strict=False)
         return model
+    
+    def _load_checkpoint(self, url_or_filename):
+        """
+        Resume from a checkpoint.
+        """
+        if is_url(url_or_filename):
+            cached_file = download_cached_file(
+                url_or_filename, check_hash=False, progress=True
+            )
+            checkpoint = torch.load(cached_file, map_location=self.device)
+        elif os.path.isfile(url_or_filename):
+            checkpoint = torch.load(url_or_filename, map_location=self.device)
+        else:
+            raise RuntimeError("checkpoint url or path is invalid")
+
+        state_dict = checkpoint["model"]
+        self.model.module.load_state_dict(state_dict)
+
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if self.scaler and "scaler" in checkpoint:
+            self.scaler.load_state_dict(checkpoint["scaler"])
+
+        self.start_epoch = checkpoint["epoch"] + 1
+        logging.info("Resume checkpoint from {}".format(url_or_filename))

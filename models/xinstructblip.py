@@ -5,6 +5,8 @@ import torch
 import random
 import contextlib
 
+from torch.nn.modules.module import _IncompatibleKeys
+
 from transformers import LlamaTokenizer, BitsAndBytesConfig
 from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
 from lavis.models.blip2_models.blip2 import disabled_train
@@ -64,6 +66,7 @@ class XInstructBLIP(nn.Module):
         self.enumerate_inputs = False
 
         self.modalities = ["audio", "video"] # TODO set to ["video"] for baselines
+        self.lora = True
 
 
         # Init video encoder
@@ -131,7 +134,7 @@ class XInstructBLIP(nn.Module):
         self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
 
 
-        if self.finetune:
+        if self.lora:
             from model_utils import get_peft_config
             # reduce memory usage by loading model in 4 bit quantization, allowed as model is frozen using LoRA
             quantization_config = BitsAndBytesConfig(
@@ -169,10 +172,7 @@ class XInstructBLIP(nn.Module):
             for name, param in self.llm_model.named_parameters():
                 param.requires_grad = False
 
-        self.load_projection_video = True
-        self.load_projection_audio = True
-        self.load_projection_type_video = "video"
-        self.load_projection_type_audio = "audio"
+
         for modality in self.modalities:
             load_projection_path = getattr(self, f"pretrained_{modality}_qformer")
             setattr(self, f"load_projection_{modality}", load_projection_path)
@@ -182,10 +182,16 @@ class XInstructBLIP(nn.Module):
                 qformer.config.hidden_size, 
                 self.llm_hidden_size,
                 load_projection_path=load_projection_path, 
-                load_projection_type=getattr(self, f"load_projection_type_{modality}")
+                load_projection_type=modality
             )
             setattr(self, f"{modality}_llm_proj", proj)
         
+        self.finetuned = False
+        if not self.finetuned:
+            self.load_from_pretrained("https://storage.googleapis.com/sfr-vision-language-research/LAVIS/models/BLIP2/blip2_pretrained.pth")
+        else:
+            self.load_checkpoint("\path\to\checkpoint") # TODO
+            
         # Freeze QFormers
         for modality in self.modalities:
             for name, param in getattr(self, f"{modality}_ln").named_parameters():
@@ -290,7 +296,6 @@ class XInstructBLIP(nn.Module):
 
         inputs_llm = {}
         atts_llm = {}
-        enumeration = {}
 
         for i,modality in enumerate(curr_modalities):
             # num*bs, num query tokens, llm emb size
@@ -299,13 +304,6 @@ class XInstructBLIP(nn.Module):
             inputs_llm[modality] = inputs_llm[modality].reshape(bs, num[modality], self.num_query_token, -1).view(bs,  num[modality]*self.num_query_token, -1)
             atts_llm[modality] =  torch.ones(inputs_llm[modality].size()[:-1], dtype=torch.long).to(self.device)
             
-            # TODO maybe remove
-            if self.enumerate_inputs:
-                enumeration[modality] = self.llm_tokenizer(
-                [f"{'' if i == 0 else ' '}({chr(97+i)}) " for _ in prompt],
-                return_tensors="pt",
-                add_special_tokens=False if (i!= 0 or self.prefix) else True
-                ).to(self.device)
 
         ## remove trailing whitespace 
         prompt = [p.strip() for p in prompt]
@@ -659,6 +657,87 @@ class XInstructBLIP(nn.Module):
             proj.load_state_dict(loaded_state_dict, strict=False)
         
         return proj
+    
+    def get_state_dict(self, url_or_filename, **kwargs):
+        if is_url(url_or_filename):
+            cached_file = download_cached_file(
+                url_or_filename, check_hash=False, progress=True
+            )
+            checkpoint = torch.load(cached_file, map_location="cpu")
+        elif os.path.isfile(url_or_filename):
+            checkpoint = torch.load(url_or_filename, map_location="cpu")
+        else:
+            raise RuntimeError("checkpoint url or path is invalid")
+
+        if "model" in checkpoint.keys():
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+        return state_dict
+    
+    def load_from_pretrained(self, url_or_filename, **kwargs):
+        state_dict = self.get_state_dict(url_or_filename)
+        self.load_state_dict(state_dict, strict=False)
+        logging.info("load checkpoint from %s" % url_or_filename)
+
+    def load_checkpoint(self, url_or_filename, **kwargs):
+        """
+        Load from a finetuned checkpoint.
+
+        This should expect no mismatch in the model keys and the checkpoint keys.
+        """
+        state_dict = self.get_state_dict(url_or_filename)
+        self.load_state_dict(state_dict, strict=True)
+        logging.info("load checkpoint from %s" % url_or_filename)
+    
+    def load_state_dict(self, state_dict, strict=True):
+        # from pdb import set_trace; set_trace()
+        unexpected_keys = []
+        missing_keys = []
+        
+        for modality in self.modalities:
+            ## Load Q-Former if not loaded from config
+            if not getattr(self, f"pretrained_{modality}_qformer"):
+
+                modality_qformer_state_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"{modality}_Qformer" == k.split('.')[0]}
+                msg = getattr(self, f"{modality}_Qformer").load_state_dict(modality_qformer_state_dict, strict=strict)
+                missing_keys.extend(msg.missing_keys)
+                unexpected_keys.extend(msg.unexpected_keys)
+
+                ## Load query tokens
+                if f"{modality}_query_tokens" not in state_dict:
+                    missing_keys.append(f"{modality}_query_tokens")
+                else:
+                    logging.info(f"Loaded {modality} query tokens")
+                    getattr(self, f"{modality}_query_tokens").data =  state_dict[f"{modality}_query_tokens"]
+
+                # load modality layer norm if not loaded from config
+                modality_ln_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"{modality}_ln" in k.split('.')[0]}
+
+                msg = getattr(self, f"{modality}_ln").load_state_dict(modality_ln_dict, strict=strict)
+                missing_keys.extend(msg.missing_keys)
+                unexpected_keys.extend(msg.unexpected_keys)
+
+            ## Load LLM projections if not loaded from config
+            if not getattr(self, f"load_projection_{modality}"):
+                if not getattr(self, f"projection_path_{modality}"):
+                    logging.info(f"Loaded {modality} llm  projection")
+                    modality_llm_projection_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"{modality}_llm_proj" in k.split('.')[0]}
+                    msg = getattr(self, f"{modality}_llm_proj").load_state_dict(modality_llm_projection_dict, strict=strict)
+                    missing_keys.extend(msg.missing_keys)
+                    unexpected_keys.extend(msg.unexpected_keys)
+        
+        ## llm model is loaded from pretrained
+        lora_state_dict = {'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"llm_model" in k.split('.')[0]}
+
+        if not self.lora or len(lora_state_dict) == 0:
+            unexpected_keys = [k for k in unexpected_keys if k.split('.')[0] != 'llm_model']
+        else:
+            msg = self.llm_model.load_state_dict({'.'.join(k.split('.')[1:]):v for k,v in state_dict.items() if f"llm_model" in k.split('.')[0]}, strict=False)
+            missing_keys.extend(["llm_model."+k for k in msg.missing_keys])
+        missing_keys = [k for k in missing_keys if 'encoder' not in k.split('.')[0]]
+        missing_keys = [k for k in missing_keys if k.split('.')[0] != 'llm_model']
+        return _IncompatibleKeys(missing_keys, unexpected_keys)
 
 class LayerNorm(nn.LayerNorm):
     """Subclass torch's LayerNorm to handle fp16."""
