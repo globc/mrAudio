@@ -90,12 +90,16 @@ class XInstructBLIP(nn.Module):
         if "audio" in self.modalities: # For baselines w/o audio
             # Init audio encoder
             self.pretrained_audio_qformer = "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"
-            audio_encoder_kwargs = {
-                "checkpoint_path": audio_path,
-                "load_ln_path": self.pretrained_audio_qformer,
-                "load_ln_type": "audio"
-            }
-            self.audio_encoder, self.audio_ln = self.init_audio_encoder("beats", precision="fp16", **audio_encoder_kwargs)
+
+            checkpoint_path = audio_path
+            load_ln_path = self.pretrained_video_qformer
+            load_ln_type = "audio"
+
+            self.audio_encoder, self.audio_ln = self.init_audio_encoder("beats",
+                                                                        precision="fp16",
+                                                                        checkpoint_path=checkpoint_path,
+                                                                        load_ln_path=load_ln_path,
+                                                                        load_ln_type=load_ln_type)
 
             # Freeze audio encoder
             for name, param in self.audio_encoder.named_parameters():
@@ -634,16 +638,18 @@ class XInstructBLIP(nn.Module):
 
         return video_encoder, ln_video
 
-    def init_audio_encoder(self, model_name, precision, **kwargs):
+
+
+    def init_audio_encoder(self, model_name, precision,checkpoint_path,load_ln_path,load_ln_type):
         assert model_name == "beats"
         from lavis.models.beats_encoder import BeatsEncoder
-        audio_encoder = BeatsEncoder(**kwargs)
-        ln_audio = self.init_ln(audio_encoder.num_features, load_ln_path=kwargs["load_ln_path"], load_ln_type=kwargs["load_ln_type"])
+        audio_encoder = BeatsEncoder(checkpoint_path=checkpoint_path)
+        ln_audio = self.init_ln(audio_encoder.num_features, load_ln_path=load_ln_path, load_ln_type=load_ln_type)
 
         return audio_encoder, ln_audio
 
     @classmethod
-    def init_ln(cls, num_features, load_ln_path=False, load_ln_type=""):
+    def init_ln(cls, num_features, load_ln_path:str=False, load_ln_type=""):
         ln = LayerNorm(num_features)
         if load_ln_path and load_ln_type:
             url_or_filename=load_ln_path
