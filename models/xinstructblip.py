@@ -89,7 +89,7 @@ class XInstructBLIP(nn.Module):
 
         if "audio" in self.modalities: # For baselines w/o audio
             # Init audio encoder
-            self.pretrained_audio_qformer = "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"
+            self.pretrained_audio_qformer = "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/audio_qformer_improved.pth"
 
             checkpoint_path = audio_path
             load_ln_path = self.pretrained_video_qformer
