@@ -4,13 +4,9 @@ import json
 import time
 import copy
 import multiprocessing as mp
-from mr_utils import (
-    compute_average_precision_detection,
-    compute_temporal_iou_batch_cross,
-    compute_temporal_iou_batch_paired,
-    load_jsonl,
-    get_ap,
-)
+from eval.mr_utils import compute_average_precision_detection, compute_temporal_iou_batch_cross, \
+    compute_temporal_iou_batch_paired, get_ap, load_jsonl
+
 
 def compute_average_precision_detection_wrapper(
     input_triple, tiou_thresholds=np.linspace(0.5, 0.95, 10)
