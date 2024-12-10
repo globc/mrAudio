@@ -17,7 +17,8 @@ from lavis.common.dist_utils import download_cached_file
 from lavis.models.eva_vit import create_eva_vit_g
 from transformers import BertTokenizer
 
-from peft import prepare_model_for_kbit_training
+from peft import prepare_model_for_kbit_training, get_peft_model
+
 
 def concat_text_input_output(input_ids, input_atts, output_ids, output_atts):
     input_part_targets_len = []
@@ -162,7 +163,8 @@ class XInstructBLIP(nn.Module):
             self.llm_model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
             self.llm_hidden_size = self.llm_model.config.hidden_size
 
-            self.llm_model = get_peft_config(self.llm_model)
+            lora_peft_config = get_peft_config(self.llm_model)
+            self.llm_model = get_peft_model(model=self.llm_model,peft_config= lora_peft_config)
 
             # LLM frozen by peft by default
         
