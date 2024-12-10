@@ -2,22 +2,19 @@ import logging
 import torch
 import os
 import tqdm
+import torch.distributed as dist
+from lavis.common.dist_utils import download_cached_file
+from lavis.common.logger import MetricLogger, SmoothedValue
+from lavis.common.optims import LinearWarmupCosineLRScheduler
+from lavis.common.utils import is_url
+from lavis.datasets.data_utils import prepare_sample
+from torch.distributed import optim
+from torch.distributed._composable.replicate import DDP
+from torch.utils.data import DistributedSampler, DataLoader
 
 from eval.mr_eval import eval_submission
-from processors.alpro_processors import AlproVideoTrainProcessor_Stamps, AlproVideoEvalProcessor_Stamps
-from mr_dataset import MRDataset, collate_fn
-from lavis.common.utils import is_url
-from lavis.common.dist_utils import download_cached_file
-from utils import prepare_sample, post_process, moment_str_to_list
-from torch.utils.data import  DataLoader, DistributedSampler
-import torch.optim as optim
-from lavis.common.optims import LinearWarmupCosineLRScheduler
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from lavis.common.logger import MetricLogger, SmoothedValue
-from lavis.processors.audio_processors import BeatsAudioProcessor
-
-
+from utils.mr_dataset import MRDataset, collate_fn
+from utils.utils import moment_str_to_list, post_process
 
 
 class Trainer:
@@ -38,6 +35,9 @@ class Trainer:
         if args.model == "X-InstructBLIP":
             from models.xinstructblip import XInstructBLIP
             self.model = XInstructBLIP(args.model_path, args.audio_encoder)
+            from processors.alpro_processors import AlproVideoTrainProcessor_Stamps
+            from lavis import BeatsAudioProcessor
+            from processors.alpro_processors import AlproVideoEvalProcessor_Stamps
             train_video_processor = AlproVideoTrainProcessor_Stamps(n_frms=60, image_size=224)
             val_video_processor = AlproVideoEvalProcessor_Stamps(n_frms=60, image_size=224)
             audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=60, is_eval=False, frame_length=512)
@@ -52,7 +52,7 @@ class Trainer:
             
         self.model = self.model.o(args.gpu)
 
-        self.optimizer = optim.Adam(self.model.parameters(), lr=3e-4)
+        self.optimizer = optim.optim.Adam(self.model.parameters(), lr=3e-4)
         self.lr_scheduler = LinearWarmupCosineLRScheduler(self.optimizer, self.max_epoch, min_lr=0, init_lr=3e-4, warmup_steps=2255, warmup_start_lr=1e-8)
         self.scaler = torch.cuda.amp.GradScaler()
 
