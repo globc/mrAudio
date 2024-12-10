@@ -34,7 +34,7 @@ pip install -r requirements_videoLLaMA.txt
 ####./scripts/VideoLLaMA/qvh.sh
 ####./scripts/VideoLLaMA/charades_sta.sh
 
-./scripts/VideoLLaMA/infer/charades_sta.sh
+./scripts/infer/VideoLLaMA/charades_sta.sh
 deactivate
 
 EXITCODE=$?

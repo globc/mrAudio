@@ -21,20 +21,19 @@
 # your job's "payload" in form of commands to execute, eg.
 # specification from OMP_NUM_THREADS depends on your program
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-?~@~K
 # for checking whether and which GPUs have been allocated
 # (output appears in the "#SBATCH -e" file specified above):
 nvidia-smi 1>&2
 # if your program supports this way of getting told how many GPUs to use:
 export CUDA_NUM_DEVICES=$SLURM_GPUS_ON_NODE
 
-ml gcc/11 python/3.8
+ml gcc/11 python/3.8 cuda
 source mraudio/bin/activate
 pip install -r requirements_videoLLaMA.txt
 ####./scripts/VideoLLaMA/qvh.sh
 ####./scripts/VideoLLaMA/charades_sta.sh
 
-./scripts/VideoLLaMA/tain/charades_sta.sh
+./scripts/train/VideoLLaMA/charades_sta.sh
 deactivate
 
 EXITCODE=$?
