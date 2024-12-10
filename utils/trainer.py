@@ -3,10 +3,10 @@ import torch
 import os
 import tqdm
 
-from mrAudio.eval.mr_eval import eval_submission
-from mrAudio.models.videollama import VideoLLaMA
-from mrAudio.models.xinstructblip import XInstructBLIP
-from mrAudio.processors.alpro_processors import AlproVideoTrainProcessor_Stamps, AlproVideoEvalProcessor_Stamps
+from eval.mr_eval import eval_submission
+from models.videollama import VideoLLaMA
+from models.xinstructblip import XInstructBLIP
+from processors.alpro_processors import AlproVideoTrainProcessor_Stamps, AlproVideoEvalProcessor_Stamps
 from mr_dataset import MRDataset, collate_fn
 from lavis.common.utils import is_url
 from lavis.common.dist_utils import download_cached_file
