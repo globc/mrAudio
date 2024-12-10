@@ -1,7 +1,7 @@
 import logging
 import torch
 import os
-import tqdm
+from tqdm import tqdm
 import torch.distributed as dist
 from lavis.common.dist_utils import download_cached_file
 from lavis.common.logger import MetricLogger, SmoothedValue
@@ -31,6 +31,11 @@ class Trainer:
         self.accum_grad_iters = 2
         self.start_epoch = 0
 
+        assert args.dataset in ["QVH", "Charades_STA"]
+        n_frms = 60 if args.dataset == "QVH" else 20
+
+        n_frms = 20 # TODO remove later only for testing
+
         # get model
         if args.model == "X-InstructBLIP":
             from models.xinstructblip import XInstructBLIP
@@ -38,9 +43,9 @@ class Trainer:
             from processors.alpro_processors import AlproVideoTrainProcessor_Stamps
             from lavis import BeatsAudioProcessor
             from processors.alpro_processors import AlproVideoEvalProcessor_Stamps
-            train_video_processor = AlproVideoTrainProcessor_Stamps(n_frms=60, image_size=224)
-            val_video_processor = AlproVideoEvalProcessor_Stamps(n_frms=60, image_size=224)
-            audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=60, is_eval=False, frame_length=512)
+            train_video_processor = AlproVideoTrainProcessor_Stamps(n_frms=n_frms, image_size=224)
+            val_video_processor = AlproVideoEvalProcessor_Stamps(n_frms=n_frms, image_size=224)
+            audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=n_frms, is_eval=False, frame_length=512)
         
 
         elif args.model == "VideoLLaMA":
@@ -58,7 +63,6 @@ class Trainer:
 
         self.model = DistributedDataParallel(self.model, device_ids=[args.gpu])
 
-        assert args.dataset in ["QVH", "Charades_STA"]
         train_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.train_annotation_file, video_processor=train_video_processor, audio_processor=audio_processor, model=args.model)
         val_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.val_annotation_file, video_processor=val_video_processor, audio_processor=audio_processor, model=args.model)
 
@@ -116,7 +120,8 @@ class Trainer:
             self.lr_scheduler.step(cur_epoch=cur_epoch, cur_step=i)
 
             with torch.cuda.amp.autocast():
-                loss = self.model.forward(samples)
+                output = self.model(samples)
+                loss = output["loss"] / self.accum_grad_iters
 
             self.scaler.scale(loss).backward()
             
@@ -127,7 +132,9 @@ class Trainer:
                 self.scaler.update()
                 self.optimizer.zero_grad()
 
-            metric_logger.update(loss=loss.item())
+
+            loss_dict = {k: v for k, v in output.items() if "loss" in k}
+            metric_logger.update(**loss_dict)
             metric_logger.update(lr=self.optimizer.param_groups[0]["lr"])
 
 

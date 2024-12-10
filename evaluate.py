@@ -11,13 +11,18 @@ from utils.utils import convert_percentages_to_second, post_process, moment_str_
 
 def run_inference(args):
 
+    assert args.dataset in ["QVH", "Charades_STA"]
+    n_frms = 60 if args.dataset == "QVH" else 20
+
+    n_frms = 20 # TODO remove later only for testing
+
     if args.model == "X-InstructBLIP":
         from models.xinstructblip import XInstructBLIP
         from lavis.processors.audio_processors import BeatsAudioProcessor
         from processors.alpro_processors import AlproVideoEvalProcessor_Stamps
         model = XInstructBLIP(args.model_path, args.audio_encoder)
-        video_processor = AlproVideoEvalProcessor_Stamps(n_frms=60, image_size=224)
-        audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=60, is_eval=True, frame_length=512)
+        video_processor = AlproVideoEvalProcessor_Stamps(n_frms=n_frms, image_size=224)
+        audio_processor = BeatsAudioProcessor(model_name='iter3', sampling_rate=16000, n_frames=n_frms, is_eval=True, frame_length=512)
         
 
     if args.model == "VideoLLaMA":
@@ -27,8 +32,7 @@ def run_inference(args):
         audio_processor = None
         
 
-    if args.dataset in ["QVH", "Charades_STA"]:
-        dataset = MRDataset(vis_root=args.video_folder, ann_path=args.annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
+    dataset = MRDataset(vis_root=args.video_folder, ann_path=args.annotation_file, video_processor=video_processor, audio_processor=audio_processor, model=args.model)
 
     dataloader = DataLoader(dataset, shuffle=False, batch_size=args.batch_size, num_workers=args.num_workers, collate_fn=collate_fn)
 
@@ -68,7 +72,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--device", type=str, required=False, default='cuda:0')
-    parser.add_argument("--batch-size", type=int, required=False, default=1)
+    parser.add_argument("--batch-size", type=int, required=False, default=2)
     parser.add_argument("--num-workers", type=int, required=False, default=8)
     parser.add_argument("--dataset", type=str, required=True)
     args = parser.parse_args()

@@ -2,6 +2,7 @@ import ffmpeg
 import json
 from torch.utils.data import Dataset
 import os
+import torch
 
 class MRDataset(Dataset):
     def __init__(self, vis_root, ann_path, video_processor, audio_processor, model):
@@ -36,10 +37,9 @@ class MRDataset(Dataset):
 
         if self.model == "X-InstructBLIP":
             if self.audio_processor is not None:
-                audio = self.audio_processor(video_path).unsqueeze(0).to("cuda")
+                audio = self.audio_processor(video_path)
 
             video, indices, fps = self.video_processor(video_path)
-            video = video.unsqueeze(0).to("cuda")
 
             timestamps = [round(idx / fps) for idx in indices]
 
@@ -112,5 +112,9 @@ class MRDataset(Dataset):
         }
     
 def collate_fn(batch):
-    return {key: [item[key] for item in batch] for key in batch[0]} # i.e. for batch_size = 2 {"text_input": [prompt1, prompt2], "video": [video1, video2],...}
+    collated = {}
+    for key in batch[0]:
+        values = [item[key] for item in batch]
+        collated[key] = torch.stack(values, dim=0) if isinstance(values[0], torch.Tensor) else values
+    return collated
     

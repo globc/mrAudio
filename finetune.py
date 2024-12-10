@@ -67,7 +67,7 @@ if __name__ == "__main__":
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--device", type=str, required=False, default='cuda:0')
     parser.add_argument("--batch-size", type=int, required=False, default=2)
-    parser.add_argument("--num-workers", type=int, required=False, default=8)
+    parser.add_argument("--num-workers", type=int, required=False, default=4)
     parser.add_argument("--dataset", type=str, required=True)
     args = parser.parse_args()
 

@@ -65,10 +65,12 @@ class XInstructBLIP(nn.Module):
     def __init__(self, model_path, audio_path):
         super().__init__()
         self.enumerate_inputs = False
-
         self.modalities = ["audio", "video"] # TODO set to ["video"] for baselines
         self.lora = True
-
+        self.interleave_seconds = True
+        self.finetuned = "" # Path to finetuned checkpoint
+        self.max_txt_len=128
+        self.max_output_txt_len=64
 
         # Init video encoder
         self.pretrained_video_qformer = "https://storage.googleapis.com/sfr-xinstructblip-data-research/model/xinstructblip_checkpoints/vicuna7b/video_qformer.pth"
@@ -192,11 +194,10 @@ class XInstructBLIP(nn.Module):
             )
             setattr(self, f"{modality}_llm_proj", proj)
         
-        self.finetuned = False
         if not self.finetuned:
             self.load_from_pretrained("https://storage.googleapis.com/sfr-vision-language-research/LAVIS/models/BLIP2/blip2_pretrained.pth")
         else:
-            self.load_checkpoint("\path\to\checkpoint") # TODO
+            self.load_checkpoint(self.finetuned)
             
         # Freeze QFormers
         for modality in self.modalities:
@@ -349,6 +350,8 @@ class XInstructBLIP(nn.Module):
                 assert len(samples["timestamps"][0]) == num["video"]
                 timestamp_tokens = self.llm_tokenizer(
                     [f" {timestamps[pos]} " for timestamps in samples["timestamps"]],
+                    padding="longest",
+                    truncation=True,
                     return_tensors="pt",
                     add_special_tokens=False
                 ).to(self.device)
@@ -359,7 +362,9 @@ class XInstructBLIP(nn.Module):
 
         # Duration
         duration_tokens = self.llm_tokenizer(
-            samples["duration"],
+            [f"{dur} " for dur in samples["duration"]],
+            padding="longest",
+            truncation=True,
             return_tensors="pt",
             add_special_tokens=False
         ).to(self.device)
@@ -426,7 +431,7 @@ class XInstructBLIP(nn.Module):
         
         query_outputs = {}
         text_Qformer = self.tokenizer(
-                samples["text_input"] if not self.special_qformer_input_prompt else self.special_qformer_input_prompt,
+                samples["text_input"],
                 padding='longest',
                 truncation=True,
                 max_length=self.max_txt_len,
@@ -509,7 +514,7 @@ class XInstructBLIP(nn.Module):
 
         bs = inputs_embeds.shape[0]
         
-        prompt = samples["prompt"]
+        prompt = samples["text_input"]
 
         att_list = []
         inp_list = []
@@ -535,6 +540,8 @@ class XInstructBLIP(nn.Module):
                 assert len(samples["timestamps"][0]) == num["video"]
                 timestamp_tokens = self.llm_tokenizer(
                     [f" {timestamps[pos]} " for timestamps in samples["timestamps"]],
+                    padding="longest",
+                    truncation=True,
                     return_tensors="pt",
                     add_special_tokens=False
                 ).to(self.device)
@@ -545,7 +552,9 @@ class XInstructBLIP(nn.Module):
 
         # Duration
         duration_tokens = self.llm_tokenizer(
-            samples["duration"],
+            [f"{dur} " for dur in samples["duration"]],
+            padding="longest",
+            truncation=True,
             return_tensors="pt",
             add_special_tokens=False
         ).to(self.device)
