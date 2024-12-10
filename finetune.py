@@ -34,12 +34,12 @@ def init_distributed_mode(args):
     builtin_print = __builtin__.print
 
     is_master = args.rank == 0
-    def print(*args, **kwargs):
+    def _print(*args, **kwargs):
         force = kwargs.pop("force", False)
         if is_master or force:
             builtin_print(*args, **kwargs)
 
-    __builtin__.print = print
+    __builtin__.print = _print
 
 
 def run_train(args):
