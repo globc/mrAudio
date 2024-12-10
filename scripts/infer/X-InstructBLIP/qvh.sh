@@ -15,4 +15,4 @@ cd eval
 python3 mr_eval.py \
     --submission_path ${OUTPUT_FILE} \
     --gt_path ${ANNOTATION_FILE} \
-    --save_path ${RESULT_FILE} \
+    --save_path ${RESULT_FILE}

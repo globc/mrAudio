@@ -50,7 +50,7 @@ class Trainer:
             val_video_processor = self.model.processor
             audio_processor = None
             
-        self.model = self.model.to(args.gpu)
+        self.model = self.model.o(args.gpu)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=3e-4)
         self.lr_scheduler = LinearWarmupCosineLRScheduler(self.optimizer, self.max_epoch, min_lr=0, init_lr=3e-4, warmup_steps=2255, warmup_start_lr=1e-8)

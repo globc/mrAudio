@@ -35,7 +35,7 @@ pip install -r requirements_xinstructblip.txt
 ####./scripts/X-InstructBLIP/qvh.sh
 ####./scripts/X-InstructBLIP/charades_sta.sh
 
-./scripts/X-InstructBLIP/qvh.sh
+./scripts/X-InstructBLIP/infer/qvh.sh
 deactivate
 
 EXITCODE=$?
