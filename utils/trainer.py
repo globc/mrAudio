@@ -9,7 +9,7 @@ from lavis.common.optims import LinearWarmupCosineLRScheduler
 from lavis.common.utils import is_url
 from lavis.datasets.data_utils import prepare_sample
 from torch.distributed import optim
-from torch.distributed._composable.replicate import DDP
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DistributedSampler, DataLoader
 
 from eval.mr_eval import eval_submission
@@ -56,7 +56,7 @@ class Trainer:
         self.lr_scheduler = LinearWarmupCosineLRScheduler(self.optimizer, self.max_epoch, min_lr=0, init_lr=3e-4, warmup_steps=2255, warmup_start_lr=1e-8)
         self.scaler = torch.cuda.amp.GradScaler()
 
-        self.model = DDP(self.model, device_ids=[args.gpu])
+        self.model = DistributedDataParallel(self.model, device_ids=[args.gpu])
 
         assert args.dataset in ["QVH", "Charades_STA"]
         train_dataset = MRDataset(vis_root=args.video_folder, ann_path=args.train_annotation_file, video_processor=train_video_processor, audio_processor=audio_processor, model=args.model)
