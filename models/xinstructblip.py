@@ -140,7 +140,7 @@ class XInstructBLIP(nn.Module):
 
 
         if self.lora:
-            from model_utils import get_peft_config
+            from models.model_utils import get_peft_config
             # reduce memory usage by loading model in 4 bit quantization, allowed as model is frozen using LoRA
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
