@@ -3,17 +3,21 @@ import torch
 import os
 import tqdm
 
-from utils.mr_dataset import MRDataset, collate_fn
+from mrAudio.eval.mr_eval import eval_submission
+from mrAudio.models.videollama import VideoLLaMA
+from mrAudio.models.xinstructblip import XInstructBLIP
+from mrAudio.processors.alpro_processors import AlproVideoTrainProcessor_Stamps, AlproVideoEvalProcessor_Stamps
+from mr_dataset import MRDataset, collate_fn
 from lavis.common.utils import is_url
 from lavis.common.dist_utils import download_cached_file
-from utils.utils import prepare_sample, post_process, moment_str_to_list
-from eval.mr_eval import eval_submission
+from utils import prepare_sample, post_process, moment_str_to_list
 from torch.utils.data import  DataLoader, DistributedSampler
 import torch.optim as optim
 from lavis.common.optims import LinearWarmupCosineLRScheduler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from lavis.common.logger import MetricLogger, SmoothedValue
+from lavis.processors.audio_processors import BeatsAudioProcessor
 
 
 
@@ -34,9 +38,8 @@ class Trainer:
 
         # get model
         if args.model == "X-InstructBLIP":
-            from models.xinstructblip import XInstructBLIP
-            from lavis.processors.audio_processors import BeatsAudioProcessor
-            from processors.alpro_processors import AlproVideoEvalProcessor_Stamps, AlproVideoTrainProcessor_Stamps
+
+
             self.model = XInstructBLIP(args.model_path, args.audio_encoder)
             train_video_processor = AlproVideoTrainProcessor_Stamps(n_frms=60, image_size=224)
             val_video_processor = AlproVideoEvalProcessor_Stamps(n_frms=60, image_size=224)
@@ -44,7 +47,6 @@ class Trainer:
         
 
         elif args.model == "VideoLLaMA":
-            from models.videollama import VideoLLaMA
             self.model = VideoLLaMA(args.model_path)
             train_video_processor = self.model.processor
             val_video_processor = self.model.processor
