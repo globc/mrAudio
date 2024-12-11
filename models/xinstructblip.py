@@ -842,6 +842,10 @@ class XInstructBLIP(nn.Module):
         missing_keys = [k for k in missing_keys if 'encoder' not in k.split('.')[0]]
         missing_keys = [k for k in missing_keys if k.split('.')[0] != 'llm_model']
         return _IncompatibleKeys(missing_keys, unexpected_keys)
+    
+    def get_optimizer_params(self, weight_decay, lr_scale=1):
+        from lavis.models.base_model import BaseModel
+        return BaseModel.get_optimizer_params(self, weight_decay, lr_scale=lr_scale)
 
 class LayerNorm(nn.LayerNorm):
     """Subclass torch's LayerNorm to handle fp16."""

@@ -55,8 +55,15 @@ class Trainer:
             
         self.model = self.model.to(args.gpu)
 
+
+        optim_params = self.model.get_optimizer_params(weight_decay=0.05, lr_scale=1)
+        self._optimizer = torch.optim.AdamW(
+            optim_params,
+            lr=float(3e-4),
+            betas=(0.9, 0.999),
+        )    
         self.optimizer = optim.optim.Adam(self.model.parameters(), lr=3e-4)
-        self.lr_scheduler = LinearWarmupCosineLRScheduler(self.optimizer, self.max_epoch, min_lr=0, init_lr=3e-4, warmup_steps=2255, warmup_start_lr=1e-8)
+        self.lr_scheduler = LinearWarmupCosineLRScheduler(self.optimizer, self.max_epoch, min_lr=0, init_lr=3e-4, warmup_steps=9025, warmup_start_lr=1e-8)
         self.scaler = torch.cuda.amp.GradScaler()
 
         self.model = DistributedDataParallel(self.model, device_ids=[args.gpu])
