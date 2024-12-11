@@ -11,6 +11,6 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES CUDA_LAUNCH_BLOCKING=1 python -m torc
             --audio-encoder $HPC_SCRATCH/mrAudio/checkpoints/X-InstructBLIP/BEATs_iter3_plus_AS2M.pt \
             --dataset Charades_STA \
             --video-folder $HPC_SCRATCH/mrAudio/data/Charades/Charades_v1 \
-            --train-annotation-file $HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/proc/new_train_10.jsonl \
-            --val-annotation-file $HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/proc/new_val_10.jsonl \
+            --train-annotation-file $HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/proc/new_train.jsonl \
+            --val-annotation-file $HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/proc/new_val.jsonl \
             --output-dir $HPC_SCRATCH/mrAudio/checkpoints/charades_sta/X-InstructBLIP/
