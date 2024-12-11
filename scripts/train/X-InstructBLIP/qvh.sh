@@ -1,7 +1,11 @@
-export CUDA_VISIBLE_DEVICES=nvidia-smi --list-gpus | grep GPU | awk -F: '{print $1}' | awk '{print $2}' | tr '\n' ',' | sed 's/,$//'
+export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ',' | sed 's/,$//')
 echo $CUDA_VISIBLE_DEVICES
 
-python -m torch.distributed.run --nproc_per_node=4 finetune.py \
+export NUM_GPUS=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
+echo $NUM_GPUS
+
+
+python -m torch.distributed.run --nproc_per_node=$NUM_GPUS finetune.py \
             --model X-InstructBLIP \
             --model-path $HPC_SCRATCH/mrAudio/checkpoints/X-InstructBLIP/vicuna-7b-v1.1 \
             --audio-encoder $HPC_SCRATCH/mrAudio/checkpoints/X-InstructBLIP/BEATs_iter3_plus_AS2M.pt \
