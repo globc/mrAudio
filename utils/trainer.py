@@ -149,7 +149,6 @@ class Trainer:
     @torch.no_grad()
     def eval_epoch(self):
         model = self.model.module # unwrap from DDP
-        model = self._reload_best_model(model)
 
         model.eval()
 
