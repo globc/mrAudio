@@ -5,7 +5,7 @@ export NUM_GPUS=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
 echo $NUM_GPUS
 
 
-python -m torch.distributed.run --nproc_per_node=$NUM_GPUS finetune.py \
+CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES CUDA_LAUNCH_BLOCKING=1 python -m torch.distributed.run --nproc_per_node=$NUM_GPUS finetune.py \
             --model X-InstructBLIP \
             --model-path $HPC_SCRATCH/mrAudio/checkpoints/X-InstructBLIP/vicuna-7b-v1.1 \
             --audio-encoder $HPC_SCRATCH/mrAudio/checkpoints/X-InstructBLIP/BEATs_iter3_plus_AS2M.pt \
