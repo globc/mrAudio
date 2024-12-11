@@ -34,8 +34,6 @@ class Trainer:
         assert args.dataset in ["QVH", "Charades_STA"]
         n_frms = 60 if args.dataset == "QVH" else 20
 
-        n_frms = 20 # TODO remove later only for testing
-
         # get model
         if args.model == "X-InstructBLIP":
             from models.xinstructblip import XInstructBLIP
