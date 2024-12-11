@@ -257,28 +257,38 @@ class XInstructBLIP(nn.Module):
 
 
         embeds = {}
+        query_tokens = {}
         data_atts = {}
         for modality in curr_modalities:
             data = samples[modality]
             ln = getattr(self, f"{modality}_ln")
             encoder = getattr(self, f"{modality}_encoder")
-            if modality == "video":
-                embeds[modality] = []
-                data_atts[modality] = []
-                for j in range(data.size(2)):
-                    this_frame = data[:,:,j,:,:]
-                    with self.maybe_autocast():
-                        embeds[modality].append(ln(encoder(this_frame)))
-                        data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
             
-            elif modality == 'audio':
-                embeds[modality] = []
-                data_atts[modality] = []
-                for j in range(data.size(1)):
-                    this_frame = data[:,j,:,:]
-                    with self.maybe_autocast():
-                        embeds[modality].append(ln(encoder(this_frame)))
-                    data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
+            if modality == "video":
+                # Process all frames in a batch
+                B, C, F, H, W = data.size()
+                data_reshaped = data.permute(2, 0, 1, 3, 4).reshape(F * B, C, H, W)
+                
+                with self.maybe_autocast():
+                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
+                
+                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
+                embeds[modality] = list(split_encoded)
+                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
+                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
+
+            elif modality == "audio":
+                # Process all frames in a batch
+                B, F, H, W = data.size()
+                data_reshaped = data.permute(1, 0, 2, 3).reshape(F * B, H, W)
+                
+                with self.maybe_autocast():
+                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
+                
+                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
+                embeds[modality] = list(split_encoded)
+                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
+                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
 
 
         query_outputs = {}
@@ -323,12 +333,32 @@ class XInstructBLIP(nn.Module):
         ).to(self.device)
         bs = llm_tokens.input_ids.shape[0]
 
+        # Get timestamp embeds
+        if self.interleave_seconds:
+            flattened_timestamps = [
+                f" {t} "
+                for timestamps in samples["timestamps"]
+                for t in timestamps
+            ]
+            timestamp_tokens = self.llm_tokenizer(
+                flattened_timestamps,
+                padding="longest",
+                truncation=True,
+                return_tensors="pt",
+                add_special_tokens=False
+            ).to(self.device)
+            timestamp_inputs_llm = self.llm_model.get_input_embeddings()(timestamp_tokens.input_ids)
+            timestamp_atts_llm = timestamp_tokens.attention_mask.to(self.device)
+
+            timestamp_inputs_llm = timestamp_inputs_llm.view(len(samples["timestamps"]), len(samples["timestamps"][0]), *timestamp_inputs_llm.shape[1:]) # batch_size X timestamps_per_batch X tokens_per_timestamp X embed_dim (= 4096)
+            timestamp_atts_llm = timestamp_atts_llm.view(len(samples["timestamps"]), len(samples["timestamps"][0]), timestamp_atts_llm.shape[-1]) # batch_size X timestamps_per_batch X tokens_per_timestamp
+
+
 
         att_list = []
         inp_list = []        
 
         # Joint video audio
-        print(num["video"])
         for pos in range(num['video']):
             if self.enumerate_inputs:
                 enumeration_pos = self.llm_tokenizer(
@@ -347,18 +377,8 @@ class XInstructBLIP(nn.Module):
                 inp_list.extend([self.emb_cue[modality].to(self.device).repeat(inputs_llm[modality].shape[0], 1, 1), inputs_llm[modality].view(bs,  num[modality], self.num_query_token, -1)[:, pos, :, :]])
 
             if self.interleave_seconds:
-                assert len(samples["timestamps"][0]) == num["video"]
-                timestamp_tokens = self.llm_tokenizer(
-                    [f" {timestamps[pos]} " for timestamps in samples["timestamps"]],
-                    padding="longest",
-                    truncation=True,
-                    return_tensors="pt",
-                    add_special_tokens=False
-                ).to(self.device)
-                timestamp_inputs_llm = self.llm_model.get_input_embeddings()(timestamp_tokens.input_ids)
-                timestamp_atts_llm = timestamp_tokens.attention_mask.to(self.device)
-                inp_list.extend([timestamp_inputs_llm])
-                att_list.extend([timestamp_atts_llm])
+                inp_list.extend([timestamp_inputs_llm[:, pos, :, :]])
+                att_list.extend([timestamp_atts_llm[:, pos, :]])
 
         # Duration
         duration_tokens = self.llm_tokenizer(
@@ -407,28 +427,33 @@ class XInstructBLIP(nn.Module):
             data = samples[modality]
             ln = getattr(self, f"{modality}_ln")
             encoder = getattr(self, f"{modality}_encoder")
-            if modality == "video":  
-                embeds[modality] = []
-                data_atts[modality] = []
-                for j in range(data.size(2)):
-                    this_frame = data[:,:,j,:,:]
-                    with self.maybe_autocast():
-                        embeds[modality].append(ln(encoder(this_frame)))
-                        data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
-                # B, Token Size, LM EMB
-                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(data.size(0), -1, -1)
-                    
-            elif modality == 'audio':
-                embeds[modality] = []
-                data_atts[modality] = []
-                for j in range(data.size(1)):
-                    this_frame = data[:,j,:,:]
-                    with self.maybe_autocast():
-                        embeds[modality].append(ln(encoder(this_frame)))
-                    data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
-                # B, Token Size, LM EMB
-                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(data.size(0), -1, -1)
-        
+            
+            if modality == "video":
+                # Process all frames in a batch
+                B, C, F, H, W = data.size()
+                data_reshaped = data.permute(2, 0, 1, 3, 4).reshape(F * B, C, H, W)
+                
+                with self.maybe_autocast():
+                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
+                
+                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
+                embeds[modality] = list(split_encoded)
+                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
+                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
+
+            elif modality == "audio":
+                # Process all frames in a batch
+                B, F, H, W = data.size()
+                data_reshaped = data.permute(1, 0, 2, 3).reshape(F * B, H, W)
+                
+                with self.maybe_autocast():
+                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
+                
+                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
+                embeds[modality] = list(split_encoded)
+                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
+                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
+
         query_outputs = {}
         text_Qformer = self.tokenizer(
                 samples["text_input"],
@@ -516,6 +541,26 @@ class XInstructBLIP(nn.Module):
         
         prompt = samples["text_input"]
 
+        # Get timestamp embeds
+        if self.interleave_seconds:
+            flattened_timestamps = [
+                f" {t} "
+                for timestamps in samples["timestamps"]
+                for t in timestamps
+            ]
+            timestamp_tokens = self.llm_tokenizer(
+                flattened_timestamps,
+                padding="longest",
+                truncation=True,
+                return_tensors="pt",
+                add_special_tokens=False
+            ).to(self.device)
+            timestamp_inputs_llm = self.llm_model.get_input_embeddings()(timestamp_tokens.input_ids)
+            timestamp_atts_llm = timestamp_tokens.attention_mask.to(self.device)
+
+            timestamp_inputs_llm = timestamp_inputs_llm.view(len(samples["timestamps"]), len(samples["timestamps"][0]), *timestamp_inputs_llm.shape[1:]) # batch_size X timestamps_per_batch X tokens_per_timestamp X embed_dim (= 4096)
+            timestamp_atts_llm = timestamp_atts_llm.view(len(samples["timestamps"]), len(samples["timestamps"][0]), timestamp_atts_llm.shape[-1]) # batch_size X timestamps_per_batch X tokens_per_timestamp
+
         att_list = []
         inp_list = []
         # joint video audio TODO add seconds
@@ -537,18 +582,9 @@ class XInstructBLIP(nn.Module):
                 inp_list.extend([self.emb_cue[modality].to(self.device).repeat(inputs_llm[modality].shape[0], 1, 1), inputs_llm[modality].view(bs,  num[modality], self.num_query_token, -1)[:, pos, :, :]])
              
             if self.interleave_seconds:
-                assert len(samples["timestamps"][0]) == num["video"]
-                timestamp_tokens = self.llm_tokenizer(
-                    [f" {timestamps[pos]} " for timestamps in samples["timestamps"]],
-                    padding="longest",
-                    truncation=True,
-                    return_tensors="pt",
-                    add_special_tokens=False
-                ).to(self.device)
-                timestamp_inputs_llm = self.llm_model.get_input_embeddings()(timestamp_tokens.input_ids)
-                timestamp_atts_llm = timestamp_tokens.attention_mask.to(self.device)
-                inp_list.extend([timestamp_inputs_llm])
-                att_list.extend([timestamp_atts_llm])
+                inp_list.extend([timestamp_inputs_llm[:, pos, :, :]])
+                att_list.extend([timestamp_atts_llm[:, pos, :]])
+
 
         # Duration
         duration_tokens = self.llm_tokenizer(
