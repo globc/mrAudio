@@ -4,6 +4,7 @@ import os
 
 from utils.mr_dataset import MRDataset, collate_fn
 from torch.utils.data import DataLoader
+from lavis.datasets.data_utils import prepare_sample
 from tqdm import tqdm
 
 from utils.utils import convert_percentages_to_second, post_process, moment_str_to_list
@@ -39,9 +40,10 @@ def run_inference(args):
     out_file = open(output_file, "w")
 
     for i, samples in enumerate(tqdm(dataloader)):
+        samples = prepare_sample(samples, cuda_enabled=True)
         outputs = model.generate(samples)
 
-        for qid, query, vid, raw_out in zip(samples["qids"], samples["query"], samples["vid"], outputs):
+        for qid, query, vid, raw_out in zip(samples["qid"], samples["query"], samples["vid"], outputs):
 
             pred_relevant_windows = moment_str_to_list(post_process(raw_out))
 

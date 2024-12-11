@@ -1,4 +1,4 @@
-ANNOTATION_FILE=$HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/proc/new_val_float.jsonl
+ANNOTATION_FILE=$HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/proc/new_val.jsonl
 OUTPUT_FILE=$HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/output.jsonl
 RESULT_FILE=$HPC_SCRATCH/mrAudio/data/Charades/Charades_STA/results.json
 

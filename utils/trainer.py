@@ -86,7 +86,9 @@ class Trainer:
                 results = self.eval_epoch()
                 if dist.get_rank() == 0: # only need to save once
                     agg_metrics = results["brief"]["MR-full-R1-avg"]
+                    logging.info("MR performance at epoch {}: {}".format(cur_epoch, agg_metrics))
                     if agg_metrics > best_agg_metric:
+                        best_epoch, best_agg_metric = cur_epoch, agg_metrics
                         self._save_checkpoint(cur_epoch, is_best=True)
 
             # save checkpoint according to save freq
@@ -155,7 +157,7 @@ class Trainer:
             samples = prepare_sample(samples, cuda_enabled=True)
             outputs = model.generate(samples)
 
-            for qid, query, vid, target, output in zip(samples["qids"], samples["query"], samples["vid"], samples["text_output"], outputs):
+            for qid, query, vid, target, output in zip(samples["qid"], samples["query"], samples["vid"], samples["text_output"], outputs):
                 relevant_windows = moment_str_to_list(post_process(target))
                 pred_relevant_windows = moment_str_to_list(post_process(output))
 
@@ -192,6 +194,7 @@ class Trainer:
             "scaler": self.scaler.state_dict() if self.scaler else None,
             "epoch": cur_epoch,
         }
+        os.makedirs(self.output_dir, exist_ok=True)
         save_to = os.path.join(
             self.output_dir,
             "checkpoint_{}.pth".format("best" if is_best else cur_epoch),

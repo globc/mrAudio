@@ -23,7 +23,7 @@ def load_video(video_path, n_frms=60, height=-1, width=-1, sampling="uniform"):
     # Determine frame indices based on the sampling strategy
     if sampling == "uniform":
         indices = np.arange(start, end, vlen / n_frms).astype(int)
-    if sampling == "random":
+    elif sampling == "random":
         intervals = np.linspace(start=start, stop=end, num=n_frms + 1).astype(int)
         indices = [
             low if low == high else rnd.choice(range(low, high))
