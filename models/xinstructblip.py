@@ -390,14 +390,8 @@ class XInstructBLIP(nn.Module):
                 attention_mask=attention_mask,
                 max_new_tokens=64,
             )
-        print("Output tokens: " + str(outputs))
         outputs[outputs == 0] = 2 # convert output id 0 to 2 (eos_token_id)
-
-        try:
-            output_text = self.llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        except:
-            print("ERROR invalid token")
-            output_text = ['[[-1, -1]]'] * bs
+        output_text = self.llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
         output_text = [o.strip() for o in output_text]
         print(output_text)
         return output_text
