@@ -28,7 +28,7 @@ nvidia-smi 1>&2
 # if your program supports this way of getting told how many GPUs to use:
 export CUDA_NUM_DEVICES=$SLURM_GPUS_ON_NODE
 
-ml gcc/11 python/3.8
+ml gcc/11 python/3.8 cuda/11.8
 source mraudio/bin/activate
 pip install -r requirements_videoLLaMA.txt
 ####./scripts/VideoLLaMA/qvh.sh
