@@ -17,7 +17,10 @@ from lavis.common.dist_utils import download_cached_file
 from lavis.models.eva_vit import create_eva_vit_g
 from transformers import BertTokenizer
 
-from peft import prepare_model_for_kbit_training, get_peft_model
+from peft import get_peft_model
+
+class CastOutputToFloat(nn.Sequential):
+    def forward(self, x): return super().forward(x).to(torch.float32)
 
 
 def concat_text_input_output(input_ids, input_atts, output_ids, output_atts):
@@ -143,30 +146,21 @@ class XInstructBLIP(nn.Module):
 
         if self.lora:
             from models.model_utils import get_peft_config
-            # reduce memory usage by loading model in 4 bit quantization, allowed as model is frozen using LoRA
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-            )
             self.llm_model = LlamaForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=torch.float16,
-                quantization_config=quantization_config
+                model_path, 
+                load_in_8bit=True,
+                torch_dtype=torch.float16
             )
             self.llm_model.resize_token_embeddings(len(self.llm_tokenizer))
             
             # reduce memory usage
             self.llm_model.gradient_checkpointing_enable()
-            # adjust model for finetuning using low quantization
-            self.llm_model = prepare_model_for_kbit_training(self.llm_model)
-
+            self.llm_model.enable_input_require_grads()
+            self.llm_model.lm_head = CastOutputToFloat(self.llm_model.lm_head)
             self.llm_model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
             self.llm_hidden_size = self.llm_model.config.hidden_size
 
-            lora_peft_config = get_peft_config(self.llm_model)
-            self.llm_model = get_peft_model(model=self.llm_model,peft_config= lora_peft_config)
+            self.llm_model = get_peft_model(model=self.llm_model,peft_config=get_peft_config(self.llm_model))
 
             # LLM frozen by peft by default
         
@@ -175,7 +169,7 @@ class XInstructBLIP(nn.Module):
                 model_path, torch_dtype=torch.float16
             )
             self.llm_model.resize_token_embeddings(len(self.llm_tokenizer))
-
+            self.llm_hidden_size = self.llm_model.config.hidden_size
             # Freeze LLM
             for name, param in self.llm_model.named_parameters():
                 param.requires_grad = False
@@ -228,7 +222,7 @@ class XInstructBLIP(nn.Module):
     def generate(self, samples):
         self.llm_tokenizer.padding_side = "left"
         curr_modalities = self.modalities
-        bs = samples["video"].size(0) if isinstance(samples["video"], torch.Tensor) else len(samples["video"])
+        bs = samples["video"].size(0)
         prompt = samples["text_input"]
 
         query_tokens = {}
@@ -257,38 +251,28 @@ class XInstructBLIP(nn.Module):
 
 
         embeds = {}
-        query_tokens = {}
         data_atts = {}
         for modality in curr_modalities:
             data = samples[modality]
             ln = getattr(self, f"{modality}_ln")
             encoder = getattr(self, f"{modality}_encoder")
-            
             if modality == "video":
-                # Process all frames in a batch
-                B, C, F, H, W = data.size()
-                data_reshaped = data.permute(2, 0, 1, 3, 4).reshape(F * B, C, H, W)
-                
-                with self.maybe_autocast():
-                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
-                
-                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
-                embeds[modality] = list(split_encoded)
-                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
-                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
+                embeds[modality] = []
+                data_atts[modality] = []
+                for j in range(data.size(2)):
+                    this_frame = data[:,:,j,:,:]
+                    with self.maybe_autocast():
+                        embeds[modality].append(ln(encoder(this_frame)))
+                        data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
 
-            elif modality == "audio":
-                # Process all frames in a batch
-                B, F, H, W = data.size()
-                data_reshaped = data.permute(1, 0, 2, 3).reshape(F * B, H, W)
-                
-                with self.maybe_autocast():
-                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
-                
-                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
-                embeds[modality] = list(split_encoded)
-                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
-                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
+            elif modality == 'audio':
+                embeds[modality] = []
+                data_atts[modality] = []
+                for j in range(data.size(1)):
+                    this_frame = data[:,j,:,:]
+                    with self.maybe_autocast():
+                        embeds[modality].append(ln(encoder(this_frame)))
+                    data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
 
 
         query_outputs = {}
@@ -406,14 +390,8 @@ class XInstructBLIP(nn.Module):
                 attention_mask=attention_mask,
                 max_new_tokens=64,
             )
-        print("Output tokens: " + str(outputs))
         outputs[outputs == 0] = 2 # convert output id 0 to 2 (eos_token_id)
-
-        try:
-            output_text = self.llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        except:
-            print("ERROR invalid token")
-            output_text = ['[[-1, -1]]'] * bs
+        output_text = self.llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
         output_text = [o.strip() for o in output_text]
         print(output_text)
         return output_text
@@ -435,32 +413,27 @@ class XInstructBLIP(nn.Module):
             data = samples[modality]
             ln = getattr(self, f"{modality}_ln")
             encoder = getattr(self, f"{modality}_encoder")
-            
             if modality == "video":
-                # Process all frames in a batch
-                B, C, F, H, W = data.size()
-                data_reshaped = data.permute(2, 0, 1, 3, 4).reshape(F * B, C, H, W)
-                
-                with self.maybe_autocast():
-                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
-                
-                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
-                embeds[modality] = list(split_encoded)
-                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
-                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
+                embeds[modality] = []
+                data_atts[modality] = []
+                for j in range(data.size(2)):
+                    this_frame = data[:,:,j,:,:]
+                    with self.maybe_autocast():
+                        embeds[modality].append(ln(encoder(this_frame)))
+                        data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
+                # B, Token Size, LM EMB
+                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(data.size(0), -1, -1)
 
-            elif modality == "audio":
-                # Process all frames in a batch
-                B, F, H, W = data.size()
-                data_reshaped = data.permute(1, 0, 2, 3).reshape(F * B, H, W)
-                
-                with self.maybe_autocast():
-                    encoded_frames = ln(encoder(data_reshaped))  # (F * B, Token_Size, LM_EMB)
-                
-                split_encoded = encoded_frames.view(F, B, -1, encoded_frames.size(-1)).unbind(0)  # Split into list of (B, Token_Size, LM_EMB)
-                embeds[modality] = list(split_encoded)
-                data_atts[modality] = [torch.ones((B, encoded_frames.size(-2)), dtype=torch.long).to(self.device) for _ in range(F)]
-                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(B, -1, -1)
+            elif modality == 'audio':
+                embeds[modality] = []
+                data_atts[modality] = []
+                for j in range(data.size(1)):
+                    this_frame = data[:,j,:,:]
+                    with self.maybe_autocast():
+                        embeds[modality].append(ln(encoder(this_frame)))
+                    data_atts[modality].append(torch.ones(embeds[modality][j].size()[:-1], dtype=torch.long).to(self.device))
+                # B, Token Size, LM EMB
+                query_tokens[modality] = getattr(self, f"{modality}_query_tokens").expand(data.size(0), -1, -1)
 
         query_outputs = {}
         text_Qformer = self.tokenizer(
@@ -502,9 +475,8 @@ class XInstructBLIP(nn.Module):
             inputs_llm[modality] = getattr(self, f"{modality}_llm_proj")(query_outputs[modality].last_hidden_state[:,:query_tokens[modality].size(1),:]) 
             # bs, num, num query tokens, llm emb size -> bs, num*num query tokens, llm emb size
             inputs_llm[modality] = inputs_llm[modality].reshape(bs, num[modality], self.num_query_token, -1).view(bs, num[modality]*self.num_query_token, -1)
-            atts_llm[modality] =  torch.ones(inputs_llm[modality].size()[:-1], dtype=torch.long).to(self.device)   
-        
-        
+            atts_llm[modality] =  torch.ones(inputs_llm[modality].size()[:-1], dtype=torch.long).to(self.device)
+    
 
         self.llm_tokenizer.padding_side = "right"
         self.llm_tokenizer.truncation_side = 'left'

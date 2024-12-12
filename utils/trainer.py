@@ -27,7 +27,7 @@ class Trainer:
         self.max_epoch = args.max_epoch
         self.output_dir = args.output_dir
         self.resume_ckpt_path = None # Change if resume
-        self.device = torch.device("cuda")
+        self.device = torch.device(args.gpu)
         self.accum_grad_iters = 2
         self.start_epoch = 0
 
@@ -99,7 +99,7 @@ class Trainer:
                         self._save_checkpoint(cur_epoch, is_best=True)
 
             # save checkpoint according to save freq
-            if self.save_freq>0 and cur_epoch%self.save_freq == 0:
+            if self.save_freq>0 and cur_epoch%self.save_freq == 0 and dist.get_rank() == 0:
                 self._save_checkpoint(cur_epoch, is_best=False)
 
 

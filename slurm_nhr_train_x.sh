@@ -18,8 +18,9 @@ export CUDA_NUM_DEVICES=$SLURM_GPUS_ON_NODE
 
 export HPC_SCRATCH=$WORK
 
-ml gcc/11 cuda
-conda activate /home/atuin/g102ea/g102ea19/conda/envs/py38
+ml gcc/11 cuda/11.8
+source ~/miniconda3/bin/activate
+conda activate mraudio
 pip install git+https://github.com/salesforce/LAVIS --no-deps
 pip install -r requirements_xinstructblip.txt
 
