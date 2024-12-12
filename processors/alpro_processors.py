@@ -22,17 +22,13 @@ def load_video(video_path, n_frms=60, height=-1, width=-1, sampling="uniform"):
 
     # Determine frame indices based on the sampling strategy
     if sampling == "uniform":
-        indices = np.arange(start, end, vlen / n_frms).astype(int)
+        indices = np.linspace(start=start, stop=end, num=n_frms, endpoint=False).astype(int)
     elif sampling == "random":
         intervals = np.linspace(start=start, stop=end, num=n_frms + 1).astype(int)
         indices = [
             low if low == high else rnd.choice(range(low, high))
             for low, high in zip(intervals[:-1], intervals[1:])
         ]
-    elif sampling == "headtail":
-        indices_h = sorted(rnd.sample(range(vlen // 2), n_frms // 2))
-        indices_t = sorted(rnd.sample(range(vlen // 2, vlen), n_frms // 2))
-        indices = indices_h + indices_t
     else:
         raise NotImplementedError(f"Sampling strategy '{sampling}' is not implemented.")
 
